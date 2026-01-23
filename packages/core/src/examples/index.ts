@@ -65,6 +65,8 @@ import * as scrollboxOverlayHitTest from "./scrollbox-overlay-hit-test"
 import * as scrollboxMouseTest from "./scrollbox-mouse-test"
 import * as textTruncationDemo from "./text-truncation-demo"
 import * as grayscaleBufferDemo from "./grayscale-buffer-demo"
+import * as colorCodeDemo from "./color-code-demo"
+import * as searchHighlightDemo from "./search-highlight-demo"
 import { setupCommonDemoKeys } from "./lib/standalone-keys"
 
 interface Example {
@@ -159,6 +161,19 @@ const examples: Example[] = [
       "Code viewer with line numbers, diff highlights, and diagnostics using CodeRenderable + LineNumberRenderable",
     run: codeDemo.run,
     destroy: codeDemo.destroy,
+  },
+  {
+    name: "Color Code Highlighting",
+    description:
+      "Hex color codes (#RGB, #RRGGBB, #RRGGBBAA) displayed with their actual color as background using onHighlight callback",
+    run: colorCodeDemo.run,
+    destroy: colorCodeDemo.destroy,
+  },
+  {
+    name: "Search & Highlight",
+    description: "Live search with match highlighting - jump between matches with n/N, current match shown in orange",
+    run: searchHighlightDemo.run,
+    destroy: searchHighlightDemo.destroy,
   },
   {
     name: "Diff Demo",
