@@ -1200,6 +1200,20 @@ test("CodeRenderable - onHighlight callback can add custom highlights", async ()
   await renderOnce()
 
   expect(codeRenderable.plainText).toBe("const message = 'hello';")
+
+  // Verify both the original keyword highlight and the custom highlight are applied
+  const lineHighlights = codeRenderable.getLineHighlights(0)
+  expect(lineHighlights.length).toBeGreaterThanOrEqual(2)
+
+  // Check keyword highlight exists with the correct styleId
+  const keywordStyleId = syntaxStyle.getStyleId("keyword")
+  const keywordHighlight = lineHighlights.find((h) => h.styleId === keywordStyleId)
+  expect(keywordHighlight).toBeDefined()
+
+  // Check custom highlight exists with the correct styleId
+  const customStyleId = syntaxStyle.getStyleId("custom.highlight")
+  const customHighlight = lineHighlights.find((h) => h.styleId === customStyleId)
+  expect(customHighlight).toBeDefined()
 })
 
 test("CodeRenderable - onHighlight callback returning undefined uses original highlights", async () => {
@@ -1280,6 +1294,54 @@ test("CodeRenderable - onHighlight callback is called on re-highlighting when co
   await renderOnce()
 
   expect(callbackCount).toBe(2)
+})
+
+test("CodeRenderable - onHighlight callback supports async functions", async () => {
+  const syntaxStyle = SyntaxStyle.fromStyles({
+    default: { fg: RGBA.fromValues(1, 1, 1, 1) },
+    keyword: { fg: RGBA.fromValues(0, 0, 1, 1) },
+    "async.highlight": { fg: RGBA.fromValues(0, 1, 0, 1) },
+  })
+
+  const mockClient = new MockTreeSitterClient()
+  mockClient.setMockResult({
+    highlights: [[0, 5, "keyword"]] as SimpleHighlight[],
+  })
+
+  let asyncCallbackCompleted = false
+
+  const codeRenderable = new CodeRenderable(currentRenderer, {
+    id: "test-code",
+    content: "const message = 'hello';",
+    filetype: "javascript",
+    syntaxStyle,
+    treeSitterClient: mockClient,
+    onHighlight: async (highlights) => {
+      // Simulate async operation (e.g., fetching additional highlight data)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      highlights.push([6, 13, "async.highlight", {}])
+      asyncCallbackCompleted = true
+      return highlights
+    },
+  })
+
+  currentRenderer.root.add(codeRenderable)
+  await renderOnce()
+
+  mockClient.resolveHighlightOnce(0)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  await renderOnce()
+
+  expect(asyncCallbackCompleted).toBe(true)
+  expect(codeRenderable.plainText).toBe("const message = 'hello';")
+
+  // Verify the async highlight was applied
+  const lineHighlights = codeRenderable.getLineHighlights(0)
+  expect(lineHighlights.length).toBeGreaterThanOrEqual(2)
+
+  const asyncStyleId = syntaxStyle.getStyleId("async.highlight")
+  const asyncHighlight = lineHighlights.find((h) => h.styleId === asyncStyleId && h.start === 6 && h.end === 13)
+  expect(asyncHighlight).toBeDefined()
 })
 
 test("CodeRenderable - streaming mode caches highlights between updates", async () => {
