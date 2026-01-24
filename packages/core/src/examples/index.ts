@@ -67,6 +67,9 @@ import * as textTruncationDemo from "./text-truncation-demo"
 import * as grayscaleBufferDemo from "./grayscale-buffer-demo"
 import * as colorCodeDemo from "./color-code-demo"
 import * as searchHighlightDemo from "./search-highlight-demo"
+import * as lintHighlightDemo from "./lint-highlight-demo"
+import * as bracketColorizerDemo from "./bracket-colorizer-demo"
+import * as gitBlameHighlightDemo from "./git-blame-highlight-demo"
 import { setupCommonDemoKeys } from "./lib/standalone-keys"
 
 interface Example {
@@ -174,6 +177,27 @@ const examples: Example[] = [
     description: "Live search with match highlighting - jump between matches with n/N, current match shown in orange",
     run: searchHighlightDemo.run,
     destroy: searchHighlightDemo.destroy,
+  },
+  {
+    name: "Lint Pattern Highlighter",
+    description:
+      "Highlight TODO, FIXME, HACK, NOTE, XXX, DEPRECATED using onHighlight with context.content and context.filetype",
+    run: lintHighlightDemo.run,
+    destroy: lintHighlightDemo.destroy,
+  },
+  {
+    name: "Bracket Pair Colorizer",
+    description:
+      "Match and colorize bracket pairs by depth using onHighlight with context.content - supports () [] {} <>",
+    run: bracketColorizerDemo.run,
+    destroy: bracketColorizerDemo.destroy,
+  },
+  {
+    name: "Git Blame Line Age",
+    description:
+      "Highlight lines by commit age/author using onHighlight with context.content and context.filetype - newer = brighter",
+    run: gitBlameHighlightDemo.run,
+    destroy: gitBlameHighlightDemo.destroy,
   },
   {
     name: "Diff Demo",

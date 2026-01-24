@@ -15,8 +15,8 @@ import { setupCommonDemoKeys } from "./lib/standalone-keys"
 import { parseColor } from "../lib/RGBA"
 import { SyntaxStyle } from "../syntax-style"
 
-// Code example with hex color codes
-const codeWithColors = `// Theme colors
+// Initial code example with hex color codes
+const initialCode = `// Theme colors
 const theme = {
   primary: "#3B82F6",     // Blue
   secondary: "#10B981",   // Green
@@ -70,7 +70,13 @@ function generatePalette(base: string) {
     800: "#075985",
     900: "#0C4A6E",
   }
-}`
+}
+
+// Dynamic colors added below:
+const dynamicColors: string[] = []`
+
+// Mutable code content
+let codeWithColors = initialCode
 
 // Find hex color codes in text (#RGB, #RGBA, #RRGGBB, #RRGGBBAA formats)
 function findColorCodes(text: string): Array<{ start: number; end: number; color: string }> {
@@ -125,6 +131,47 @@ function getContrastColor(color: { r: number; g: number; b: number }): { r: numb
   return luminance > 0.5 ? { r: 0, g: 0, b: 0 } : { r: 255, g: 255, b: 255 }
 }
 
+// Generate a random hex color
+function generateRandomColor(): string {
+  const r = Math.floor(Math.random() * 256)
+  const g = Math.floor(Math.random() * 256)
+  const b = Math.floor(Math.random() * 256)
+  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`.toUpperCase()
+}
+
+// Color name suggestions based on hue
+function getColorName(hex: string): string {
+  const { r, g, b } = hexToRgb(hex)
+  const max = Math.max(r, g, b)
+  const min = Math.min(r, g, b)
+  const l = (max + min) / 2 / 255
+
+  if (max === min) {
+    return l > 0.5 ? "gray_light" : "gray_dark"
+  }
+
+  let h = 0
+  const d = max - min
+  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6
+  else if (max === g) h = ((b - r) / d + 2) / 6
+  else h = ((r - g) / d + 4) / 6
+
+  const hue = h * 360
+  const lightness = l > 0.7 ? "light" : l < 0.3 ? "dark" : ""
+
+  if (hue < 15 || hue >= 345) return `${lightness}red`.replace(/^_/, "")
+  if (hue < 45) return `${lightness}orange`.replace(/^_/, "")
+  if (hue < 75) return `${lightness}yellow`.replace(/^_/, "")
+  if (hue < 150) return `${lightness}green`.replace(/^_/, "")
+  if (hue < 210) return `${lightness}cyan`.replace(/^_/, "")
+  if (hue < 270) return `${lightness}blue`.replace(/^_/, "")
+  if (hue < 315) return `${lightness}purple`.replace(/^_/, "")
+  return `${lightness}pink`.replace(/^_/, "")
+}
+
+// Track added colors
+let addedColorCount = 0
+
 // Register color styles upfront for all hex codes found in content
 function registerColorStyles(
   syntaxStyle: SyntaxStyle,
@@ -178,13 +225,13 @@ let infoText: TextRenderable | null = null
 let syntaxStyle: SyntaxStyle | null = null
 let colorHighlightEnabled = true
 
+// Background color for blending alpha colors (module-level for addRandomColor)
+const bgColor = { r: 13, g: 17, b: 23 } // #0D1117
+
 export async function run(rendererInstance: CliRenderer): Promise<void> {
   renderer = rendererInstance
   renderer.start()
   renderer.setBackgroundColor("#0D1117")
-
-  // Background color for blending alpha colors
-  const bgColor = { r: 13, g: 17, b: 23 } // #0D1117
 
   parentContainer = new BoxRenderable(renderer, {
     id: "parent-container",
@@ -207,7 +254,7 @@ export async function run(rendererInstance: CliRenderer): Promise<void> {
 
   const instructionsText = new TextRenderable(renderer, {
     id: "instructions",
-    content: "ESC to return | C: Toggle color highlighting",
+    content: "ESC to return | C: Toggle highlighting | A: Add random color | R: Reset",
     fg: "#888888",
   })
   titleBox.add(instructionsText)
@@ -284,7 +331,7 @@ export async function run(rendererInstance: CliRenderer): Promise<void> {
 
   infoText = new TextRenderable(renderer, {
     id: "info-display",
-    content: `Color highlighting: ${colorHighlightEnabled ? "ON" : "OFF"} | Hex colors shown with their actual color as background`,
+    content: `Color highlighting: ${colorHighlightEnabled ? "ON" : "OFF"} | Added colors: ${addedColorCount}`,
     fg: "#A5D6FF",
     wrapMode: "word",
     flexShrink: 0,
@@ -293,8 +340,73 @@ export async function run(rendererInstance: CliRenderer): Promise<void> {
 
   const updateInfoText = () => {
     if (infoText) {
-      infoText.content = `Color highlighting: ${colorHighlightEnabled ? "ON" : "OFF"} | Hex colors shown with their actual color as background`
+      infoText.content = `Color highlighting: ${colorHighlightEnabled ? "ON" : "OFF"} | Added colors: ${addedColorCount}`
     }
+  }
+
+  const addRandomColor = () => {
+    const color = generateRandomColor()
+    const name = getColorName(color)
+    addedColorCount++
+
+    // Add the new color to the code
+    const newLine = `dynamicColors.push("${color}")  // ${name}_${addedColorCount}`
+
+    // Find the dynamicColors array and add to it
+    const insertPoint = codeWithColors.lastIndexOf("dynamicColors")
+    if (insertPoint !== -1) {
+      const lineEnd = codeWithColors.indexOf("\n", insertPoint)
+      if (lineEnd !== -1) {
+        codeWithColors = codeWithColors.slice(0, lineEnd + 1) + newLine + "\n" + codeWithColors.slice(lineEnd + 1)
+      } else {
+        codeWithColors = codeWithColors + "\n" + newLine
+      }
+    } else {
+      codeWithColors = codeWithColors + "\n" + newLine
+    }
+
+    // Register the new color style
+    if (syntaxStyle) {
+      const rgba = hexToRgb(color)
+      const blended = blendColors(rgba, bgColor)
+      const fg = getContrastColor(blended)
+      syntaxStyle.registerStyle(`color.${color.replace("#", "")}`, {
+        fg: RGBA.fromInts(fg.r, fg.g, fg.b),
+        bg: RGBA.fromInts(blended.r, blended.g, blended.b),
+      })
+    }
+
+    // Update the code display
+    if (codeDisplay) {
+      codeDisplay.content = codeWithColors
+    }
+
+    // Scroll to bottom to show new color
+    if (codeScrollBox) {
+      // Small delay to let content update
+      setTimeout(() => {
+        if (codeScrollBox) {
+          codeScrollBox.scrollTop = codeScrollBox.scrollHeight
+        }
+      }, 10)
+    }
+
+    updateInfoText()
+  }
+
+  const resetColors = () => {
+    codeWithColors = initialCode
+    addedColorCount = 0
+
+    if (codeDisplay) {
+      codeDisplay.content = codeWithColors
+    }
+
+    if (codeScrollBox) {
+      codeScrollBox.scrollTop = 0
+    }
+
+    updateInfoText()
   }
 
   keyboardHandler = (key: ParsedKey) => {
@@ -305,6 +417,12 @@ export async function run(rendererInstance: CliRenderer): Promise<void> {
         codeDisplay.onHighlight = colorHighlightEnabled ? colorHighlighter : undefined
       }
       updateInfoText()
+    } else if (key.name === "a" && !key.ctrl && !key.meta) {
+      // Add a random color
+      addRandomColor()
+    } else if (key.name === "r" && !key.ctrl && !key.meta) {
+      // Reset to initial code
+      resetColors()
     }
   }
 
@@ -324,6 +442,10 @@ export function destroy(rendererInstance: CliRenderer): void {
   codeWithLineNumbers = null
   infoText = null
   syntaxStyle = null
+
+  // Reset state
+  codeWithColors = initialCode
+  addedColorCount = 0
 
   renderer = null
 }
