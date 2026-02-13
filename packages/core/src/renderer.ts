@@ -280,6 +280,13 @@ export async function createCliRenderer(config: CliRendererConfig = {}): Promise
   }
   ziglib.setUseThread(rendererPtr, config.useThread)
 
+  // Set the output file descriptor so the native renderer writes to the correct
+  // stream. This allows multiple renderers in one process to target different
+  // outputs (e.g. separate SSH sessions).
+  if (typeof stdout.fd === "number") {
+    ziglib.setOutputFd(rendererPtr, stdout.fd)
+  }
+
   const kittyConfig = config.useKittyKeyboard ?? {}
   const kittyFlags = buildKittyKeyboardFlags(kittyConfig)
 

@@ -123,6 +123,10 @@ function getOpenTUILib(libPath?: string) {
       args: ["ptr", "bool"],
       returns: "void",
     },
+    setOutputFd: {
+      args: ["ptr", "i32"],
+      returns: "void",
+    },
     setBackgroundColor: {
       args: ["ptr", "ptr"],
       returns: "void",
@@ -1344,6 +1348,7 @@ export interface RenderLib {
   createRenderer: (width: number, height: number, options?: { testing?: boolean; remote?: boolean }) => Pointer | null
   destroyRenderer: (renderer: Pointer) => void
   setUseThread: (renderer: Pointer, useThread: boolean) => void
+  setOutputFd: (renderer: Pointer, fd: number) => void
   setBackgroundColor: (renderer: Pointer, color: RGBA) => void
   setRenderOffset: (renderer: Pointer, offset: number) => void
   updateStats: (renderer: Pointer, time: number, fps: number, frameCallbackTime: number) => void
@@ -1950,6 +1955,10 @@ class FFIRenderLib implements RenderLib {
 
   public setUseThread(renderer: Pointer, useThread: boolean) {
     this.opentui.symbols.setUseThread(renderer, useThread)
+  }
+
+  public setOutputFd(renderer: Pointer, fd: number) {
+    this.opentui.symbols.setOutputFd(renderer, fd)
   }
 
   public setBackgroundColor(renderer: Pointer, color: RGBA) {

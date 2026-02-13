@@ -50,6 +50,7 @@ pub const CliRenderer = struct {
     renderOffset: u32,
     terminal: Terminal,
     testing: bool = false,
+    output_file: std.fs.File,
     useAlternateScreen: bool = true,
     terminalSetup: bool = false,
 
@@ -257,6 +258,7 @@ pub const CliRenderer = struct {
             .hitGridWidth = width,
             .hitGridHeight = height,
             .hitScissorStack = hitScissorStack,
+            .output_file = std.fs.File.stdout(),
         };
 
         try currentBuffer.clear(.{ self.backgroundColor[0], self.backgroundColor[1], self.backgroundColor[2], self.backgroundColor[3] }, CLEAR_CHAR);
@@ -305,7 +307,7 @@ pub const CliRenderer = struct {
         self.useAlternateScreen = useAlternateScreen;
         self.terminalSetup = true;
 
-        var stdoutWriter = std.fs.File.stdout().writer(&self.stdoutBuffer);
+        var stdoutWriter = self.output_file.writer(&self.stdoutBuffer);
         const writer = &stdoutWriter.interface;
 
         self.terminal.queryTerminalSend(writer) catch {
@@ -317,7 +319,7 @@ pub const CliRenderer = struct {
     }
 
     fn setupTerminalWithoutDetection(self: *CliRenderer, useAlternateScreen: bool) void {
-        var stdoutWriter = std.fs.File.stdout().writer(&self.stdoutBuffer);
+        var stdoutWriter = self.output_file.writer(&self.stdoutBuffer);
         const writer = &stdoutWriter.interface;
 
         writer.writeAll(ansi.ANSI.saveCursorState) catch {};
@@ -348,7 +350,7 @@ pub const CliRenderer = struct {
     pub fn performShutdownSequence(self: *CliRenderer) void {
         if (!self.terminalSetup) return;
 
-        var stdoutWriter = std.fs.File.stdout().writer(&self.stdoutBuffer);
+        var stdoutWriter = self.output_file.writer(&self.stdoutBuffer);
         const direct = &stdoutWriter.interface;
         self.terminal.resetState(direct) catch {
             logger.warn("Failed to reset terminal state", .{});
@@ -439,6 +441,23 @@ pub const CliRenderer = struct {
         self.useThread = useThread;
     }
 
+    pub fn setOutputFd(self: *CliRenderer, fd: i32) void {
+        self.output_file = fileFromFd(fd);
+    }
+
+    fn fileFromFd(fd: i32) std.fs.File {
+        const Handle = std.fs.File.Handle;
+        const handle_info = @typeInfo(Handle);
+        return .{
+            .handle = switch (handle_info) {
+                .@"enum" => @enumFromInt(@as(handle_info.@"enum".tag_type, @intCast(fd))),
+                .int => @intCast(fd),
+                .pointer => @ptrFromInt(@as(usize, @intCast(fd))),
+                else => @compileError("unsupported File.Handle type"),
+            },
+        };
+    }
+
     pub fn updateStats(self: *CliRenderer, time: f64, fps: u32, frameCallbackTime: f64) void {
         self.renderStats.overallFrameTime = time;
         self.renderStats.fps = fps;
@@ -515,7 +534,7 @@ pub const CliRenderer = struct {
             const writeStart = std.time.microTimestamp();
 
             if (outputLen > 0 and !self.testing) {
-                var stdoutWriter = std.fs.File.stdout().writer(&self.stdoutBuffer);
+                var stdoutWriter = self.output_file.writer(&self.stdoutBuffer);
                 const w = &stdoutWriter.interface;
                 w.writeAll(outputData[0..outputLen]) catch {};
                 w.flush() catch {};
@@ -563,7 +582,7 @@ pub const CliRenderer = struct {
         } else {
             const writeStart = std.time.microTimestamp();
             if (!self.testing) {
-                var stdoutWriter = std.fs.File.stdout().writer(&self.stdoutBuffer);
+                var stdoutWriter = self.output_file.writer(&self.stdoutBuffer);
                 const w = &stdoutWriter.interface;
                 w.writeAll(outputBuffer[0..outputBufferLen]) catch {};
                 w.flush() catch {};
@@ -852,7 +871,7 @@ pub const CliRenderer = struct {
             self.renderMutex.unlock();
         }
 
-        var stdoutWriter = std.fs.File.stdout().writer(&self.stdoutBuffer);
+        var stdoutWriter = self.output_file.writer(&self.stdoutBuffer);
         const w = &stdoutWriter.interface;
         w.writeAll(data) catch {};
         w.flush() catch {};
@@ -876,7 +895,7 @@ pub const CliRenderer = struct {
 
         if (totalLen == 0) return;
 
-        var stdoutWriter = std.fs.File.stdout().writer(&self.stdoutBuffer);
+        var stdoutWriter = self.output_file.writer(&self.stdoutBuffer);
         const w = &stdoutWriter.interface;
         for (data_slices) |slice| {
             w.writeAll(slice) catch {};
