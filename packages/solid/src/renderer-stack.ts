@@ -3,7 +3,6 @@
 import type { CliRenderer } from "@opentui/core"
 import { getOwner } from "solid-js"
 
-
 const rendererStack: CliRenderer[] = []
 
 export function pushActiveRenderer(renderer: CliRenderer): void {
@@ -37,7 +36,6 @@ function findRendererFromOwner(): CliRenderer | undefined {
   }
   return undefined
 }
-
 
 export function getActiveRenderer(): CliRenderer | undefined {
   const stackRenderer = rendererStack[rendererStack.length - 1]
