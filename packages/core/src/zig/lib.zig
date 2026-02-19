@@ -66,6 +66,10 @@ export fn setUseThread(rendererPtr: *renderer.CliRenderer, useThread: bool) void
     rendererPtr.setUseThread(useThread);
 }
 
+export fn setOutputFd(rendererPtr: *renderer.CliRenderer, fd: i64) void {
+    rendererPtr.setOutputFd(fd);
+}
+
 export fn destroyRenderer(rendererPtr: *renderer.CliRenderer) void {
     rendererPtr.destroy();
 }

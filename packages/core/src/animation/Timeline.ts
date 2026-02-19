@@ -497,53 +497,71 @@ export class Timeline {
   }
 }
 
+interface AttachedRenderer {
+  frameCallback: (deltaTime: number) => Promise<void>
+  isLive: boolean
+}
+
 class TimelineEngine {
   private timelines: Set<Timeline> = new Set()
-  private renderer: CliRenderer | null = null
-  private frameCallback: ((deltaTime: number) => Promise<void>) | null = null
-  private isLive: boolean = false
+  private renderers: Map<CliRenderer, AttachedRenderer> = new Map()
   public defaults = {
     frameRate: 60,
   }
 
   attach(renderer: CliRenderer): void {
-    if (this.renderer) {
-      this.detach()
-    }
+    if (this.renderers.has(renderer)) return
 
-    this.renderer = renderer
-    this.frameCallback = async (deltaTime: number) => {
-      this.update(deltaTime)
+    const entry: AttachedRenderer = {
+      frameCallback: async (deltaTime: number) => {
+        this.update(deltaTime)
+      },
+      isLive: false,
     }
-
-    renderer.setFrameCallback(this.frameCallback)
+    this.renderers.set(renderer, entry)
+    renderer.setFrameCallback(entry.frameCallback)
+    this.updateLiveStateFor(renderer, entry)
   }
 
-  detach(): void {
-    if (this.renderer && this.frameCallback) {
-      this.renderer.removeFrameCallback(this.frameCallback)
-      if (this.isLive) {
-        this.renderer.dropLive()
-        this.isLive = false
+  detach(renderer?: CliRenderer): void {
+    if (renderer) {
+      const entry = this.renderers.get(renderer)
+      if (entry) {
+        renderer.removeFrameCallback(entry.frameCallback)
+        if (entry.isLive) {
+          renderer.dropLive()
+        }
+        this.renderers.delete(renderer)
+      }
+      return
+    }
+
+    for (const [r, entry] of this.renderers) {
+      r.removeFrameCallback(entry.frameCallback)
+      if (entry.isLive) {
+        r.dropLive()
       }
     }
-    this.renderer = null
-    this.frameCallback = null
+    this.renderers.clear()
   }
 
-  private updateLiveState(): void {
-    if (!this.renderer) return
-
+  private updateLiveStateFor(renderer: CliRenderer, entry: AttachedRenderer): void {
     const hasRunningTimelines = Array.from(this.timelines).some(
       (timeline) => !timeline.synced && timeline.isPlaying && !timeline.isComplete,
     )
 
-    if (hasRunningTimelines && !this.isLive) {
-      this.renderer.requestLive()
-      this.isLive = true
-    } else if (!hasRunningTimelines && this.isLive) {
-      this.renderer.dropLive()
-      this.isLive = false
+    if (hasRunningTimelines && !entry.isLive) {
+      renderer.requestLive()
+      entry.isLive = true
+    } else if (!hasRunningTimelines && entry.isLive) {
+      renderer.dropLive()
+      entry.isLive = false
+    }
+  }
+
+  private updateLiveState(): void {
+    for (const [renderer, entry] of this.renderers) {
+      this.updateLiveStateFor(renderer, entry)
     }
   }
 

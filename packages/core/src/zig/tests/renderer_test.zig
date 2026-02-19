@@ -870,6 +870,95 @@ test "renderer - explicit_cursor_positioning produces more cursor moves" {
     try std.testing.expect(count_with > count_without);
 }
 
+test "renderer - setOutputFd redirects output to custom fd" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    const pool = gp.initGlobalPool(std.testing.allocator);
+    defer gp.deinitGlobalPool();
+
+    var cli_renderer = try CliRenderer.create(
+        std.testing.allocator,
+        80,
+        24,
+        pool,
+        false, // testing=false so writes actually go to output_file
+    );
+    defer cli_renderer.destroy();
+
+    // Create a pipe to capture output
+    const pipe = try std.posix.pipe();
+    const read_fd = pipe[0];
+    const write_fd = pipe[1];
+    defer std.posix.close(read_fd);
+    defer std.posix.close(write_fd);
+
+    // Redirect output to the write end of the pipe
+    cli_renderer.setOutputFd(@intCast(write_fd));
+
+    // Write a known sequence through the renderer
+    const test_data = "HELLO_OPENTUI";
+    cli_renderer.writeOut(test_data);
+
+    // Read back from the pipe and verify
+    var read_buf: [256]u8 = undefined;
+    const n = try std.posix.read(read_fd, &read_buf);
+    try std.testing.expect(n >= test_data.len);
+    try std.testing.expect(std.mem.indexOf(u8, read_buf[0..n], test_data) != null);
+}
+
+test "renderer - two renderers write to different fds" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    const pool = gp.initGlobalPool(std.testing.allocator);
+    defer gp.deinitGlobalPool();
+
+    var renderer1 = try CliRenderer.create(
+        std.testing.allocator,
+        80,
+        24,
+        pool,
+        false,
+    );
+    defer renderer1.destroy();
+
+    var renderer2 = try CliRenderer.create(
+        std.testing.allocator,
+        80,
+        24,
+        pool,
+        false,
+    );
+    defer renderer2.destroy();
+
+    // Create two separate pipes
+    const pipe1 = try std.posix.pipe();
+    defer std.posix.close(pipe1[0]);
+    defer std.posix.close(pipe1[1]);
+    const pipe2 = try std.posix.pipe();
+    defer std.posix.close(pipe2[0]);
+    defer std.posix.close(pipe2[1]);
+
+    // Point each renderer at a different pipe
+    renderer1.setOutputFd(@intCast(pipe1[1]));
+    renderer2.setOutputFd(@intCast(pipe2[1]));
+
+    // Write different data through each renderer
+    renderer1.writeOut("RENDERER_ONE");
+    renderer2.writeOut("RENDERER_TWO");
+
+    // Read from pipe1 -- should contain RENDERER_ONE only
+    var buf1: [256]u8 = undefined;
+    const n1 = try std.posix.read(pipe1[0], &buf1);
+    try std.testing.expect(std.mem.indexOf(u8, buf1[0..n1], "RENDERER_ONE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf1[0..n1], "RENDERER_TWO") == null);
+
+    // Read from pipe2 -- should contain RENDERER_TWO only
+    var buf2: [256]u8 = undefined;
+    const n2 = try std.posix.read(pipe2[0], &buf2);
+    try std.testing.expect(std.mem.indexOf(u8, buf2[0..n2], "RENDERER_TWO") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf2[0..n2], "RENDERER_ONE") == null);
+}
+
 test "renderer - explicit_cursor_positioning with CJK characters" {
     const pool = gp.initGlobalPool(std.testing.allocator);
     defer gp.deinitGlobalPool();

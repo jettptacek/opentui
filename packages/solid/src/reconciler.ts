@@ -1,6 +1,7 @@
 /* @refresh skip */
 import {
   BaseRenderable,
+  type CliRenderer,
   createTextAttributes,
   InputRenderable,
   InputRenderableEvents,
@@ -17,11 +18,15 @@ import {
   TextRenderable,
   type TextNodeOptions,
 } from "@opentui/core"
-import { useContext } from "solid-js"
+import { useContext, getOwner } from "solid-js"
 import { createRenderer } from "./renderer"
 import { getComponentCatalogue, RendererContext, SlotRenderable } from "./elements"
 import { getNextId } from "./utils/id-counter"
 import { log } from "./utils/log"
+import { getActiveRenderer } from "./renderer-stack"
+
+// Re-export for use by index.ts and consumers
+export { pushActiveRenderer, popActiveRenderer, getActiveRenderer, registerOwnerRenderer } from "./renderer-stack"
 
 class TextNode extends TextNodeRenderable {
   public static override fromString(text: string, options: Partial<TextNodeOptions> = {}): TextNode {
@@ -178,9 +183,23 @@ export const {
   createElement(tagName: string): DomNode {
     log("Creating element:", tagName)
     const id = getNextId(tagName)
-    const solidRenderer = useContext(RendererContext)
+    const ctxRenderer = useContext(RendererContext)
+    const stackRenderer = getActiveRenderer()
+    const solidRenderer = ctxRenderer ?? stackRenderer
     if (!solidRenderer) {
-      throw new Error("No renderer found")
+      const owner = getOwner() as any
+      const ownerChainLen = (() => {
+        let n = 0
+        let o = owner
+        while (o) {
+          n++
+          o = o.owner
+        }
+        return n
+      })()
+      throw new Error(
+        `No renderer found for tagName="${tagName}" id="${id}" ctxRenderer=${!!ctxRenderer} stackRenderer=${!!stackRenderer} hasOwner=${!!owner} ownerChain=${ownerChainLen} ownerCtx=${!!owner?.context}`,
+      )
     }
     const elements = getComponentCatalogue()
 

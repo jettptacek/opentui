@@ -78,6 +78,35 @@ registerEnvVar({
   default: false,
 })
 
+/**
+ * On Windows, convert a C-runtime file descriptor to a raw Windows HANDLE value.
+ * Uses _get_osfhandle() from msvcrt via Bun FFI.
+ * Returns null if the conversion fails or we're not on Windows.
+ */
+let _getOsfHandle: ((fd: number) => number) | null = null
+function getWindowsHandle(fd: number): number | null {
+  if (process.platform !== "win32") return null
+  if (!_getOsfHandle) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const ffi = require("bun:ffi")
+      const msvcrt = ffi.dlopen("msvcrt.dll", {
+        _get_osfhandle: {
+          args: ["i32"],
+          returns: "isize",
+        },
+      })
+      _getOsfHandle = (crtFd: number) => Number(msvcrt.symbols._get_osfhandle(crtFd))
+    } catch {
+      return null
+    }
+  }
+  const handle = _getOsfHandle(fd)
+  // _get_osfhandle returns -1 on error
+  if (handle === -1) return null
+  return handle
+}
+
 export interface CliRendererConfig {
   stdin?: NodeJS.ReadStream
   stdout?: NodeJS.WriteStream
@@ -281,6 +310,33 @@ export async function createCliRenderer(config: CliRendererConfig = {}): Promise
   }
   ziglib.setUseThread(rendererPtr, config.useThread)
 
+  // Set the output file descriptor so the native renderer writes to the correct
+  // stream. This allows multiple renderers in one process to target different
+  // outputs (e.g. separate SSH sessions).
+  //
+  // Priority: nativeHandle (raw OS handle) > fd (C-runtime file descriptor)
+  // On Windows, nativeHandle should be a raw HANDLE value (from CreatePipe, etc.)
+  // while fd would need _get_osfhandle() conversion.
+  if (config.stdout) {
+    const nativeHandle = (stdout as any).nativeHandle
+    if (typeof nativeHandle === "number") {
+      // Direct OS handle — use as-is (no _get_osfhandle conversion needed)
+      ziglib.setOutputFd(rendererPtr, nativeHandle)
+    } else if ("fd" in stdout && typeof stdout.fd === "number") {
+      if (process.platform === "win32") {
+        // On Windows, stdout.fd is a C-runtime file descriptor (e.g. 1).
+        // The Zig renderer needs the raw Windows HANDLE value. Use
+        // _get_osfhandle() from msvcrt to convert.
+        const handle = getWindowsHandle(stdout.fd)
+        if (handle !== null) {
+          ziglib.setOutputFd(rendererPtr, handle)
+        }
+      } else {
+        ziglib.setOutputFd(rendererPtr, stdout.fd)
+      }
+    }
+  }
+
   const kittyConfig = config.useKittyKeyboard ?? {}
   const kittyFlags = buildKittyKeyboardFlags(kittyConfig)
 
@@ -398,6 +454,7 @@ export class CliRenderer extends EventEmitter implements RenderContext {
   private selectionContainers: Renderable[] = []
   private clipboard: Clipboard
 
+  private _remote: boolean = false
   private _splitHeight: number = 0
   private renderOffset: number = 0
 
@@ -505,6 +562,7 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     this.stdout = stdout
     this.realStdoutWrite = stdout.write
     this.lib = lib
+    this._remote = config.remote ?? false
     this._terminalWidth = stdout.columns ?? width
     this._terminalHeight = stdout.rows ?? height
     this.width = width
@@ -557,18 +615,19 @@ export class CliRenderer extends EventEmitter implements RenderContext {
       this.startMemorySnapshotTimer()
     }
 
-    if (env.OTUI_OVERRIDE_STDOUT) {
+    if (env.OTUI_OVERRIDE_STDOUT && !this._remote) {
       this.stdout.write = this.interceptStdoutWrite.bind(this)
     }
 
-    // Handle terminal resize
-    process.on("SIGWINCH", this.sigwinchHandler)
-
-    process.on("warning", this.warningHandler)
-
-    process.on("uncaughtException", this.handleError)
-    process.on("unhandledRejection", this.handleError)
-    process.on("beforeExit", this.exitHandler)
+    // Remote renderers (e.g. SSH sessions) should not listen to process-level
+    // signals — SIGWINCH, uncaughtException, etc. belong to the main terminal.
+    if (!this._remote) {
+      process.on("SIGWINCH", this.sigwinchHandler)
+      process.on("warning", this.warningHandler)
+      process.on("uncaughtException", this.handleError)
+      process.on("unhandledRejection", this.handleError)
+      process.on("beforeExit", this.exitHandler)
+    }
 
     const kittyConfig = config.useKittyKeyboard ?? {}
     const useKittyForParsing = kittyConfig !== null
@@ -582,7 +641,9 @@ export class CliRenderer extends EventEmitter implements RenderContext {
       }
     })
 
-    this.addExitListeners()
+    if (!this._remote) {
+      this.addExitListeners()
+    }
 
     this._stdinBuffer = new StdinBuffer({ timeout: 5 })
 
@@ -591,21 +652,25 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     this._openConsoleOnError = config.openConsoleOnError ?? process.env.NODE_ENV !== "production"
     this._onDestroy = config.onDestroy
 
-    global.requestAnimationFrame = (callback: FrameRequestCallback) => {
-      const id = CliRenderer.animationFrameId++
-      this.animationRequest.set(id, callback)
-      this.requestLive()
-      return id
-    }
-    global.cancelAnimationFrame = (handle: number) => {
-      this.animationRequest.delete(handle)
-    }
+    // Remote renderers must not overwrite global requestAnimationFrame —
+    // that would steal animation frames from the main terminal renderer.
+    if (!this._remote) {
+      global.requestAnimationFrame = (callback: FrameRequestCallback) => {
+        const id = CliRenderer.animationFrameId++
+        this.animationRequest.set(id, callback)
+        this.requestLive()
+        return id
+      }
+      global.cancelAnimationFrame = (handle: number) => {
+        this.animationRequest.delete(handle)
+      }
 
-    const window = global.window
-    if (!window) {
-      global.window = {} as Window & typeof globalThis
+      const window = global.window
+      if (!window) {
+        global.window = {} as Window & typeof globalThis
+      }
+      global.window.requestAnimationFrame = requestAnimationFrame
     }
-    global.window.requestAnimationFrame = requestAnimationFrame
 
     // Prevents output from being written to the terminal, useful for debugging
     if (env.OTUI_NO_NATIVE_RENDER) {
@@ -1459,7 +1524,7 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     this.lib.queryPixelResolution(this.rendererPtr)
   }
 
-  private processResize(width: number, height: number): void {
+  public processResize(width: number, height: number): void {
     if (width === this._terminalWidth && height === this._terminalHeight) return
 
     const prevWidth = this._terminalWidth
@@ -1767,11 +1832,13 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     this._destroyFinalized = true
     this._destroyPending = false
 
-    process.removeListener("SIGWINCH", this.sigwinchHandler)
-    process.removeListener("uncaughtException", this.handleError)
-    process.removeListener("unhandledRejection", this.handleError)
-    process.removeListener("warning", this.warningHandler)
-    process.removeListener("beforeExit", this.exitHandler)
+    if (!this._remote) {
+      process.removeListener("SIGWINCH", this.sigwinchHandler)
+      process.removeListener("uncaughtException", this.handleError)
+      process.removeListener("unhandledRejection", this.handleError)
+      process.removeListener("warning", this.warningHandler)
+      process.removeListener("beforeExit", this.exitHandler)
+    }
     capture.removeListener("write", this.captureCallback)
     this.removeExitListeners()
 
