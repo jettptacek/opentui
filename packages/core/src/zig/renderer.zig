@@ -50,6 +50,7 @@ pub const CliRenderer = struct {
     renderOffset: u32,
     terminal: Terminal,
     testing: bool = false,
+    output_file: std.fs.File,
     useAlternateScreen: bool = true,
     terminalSetup: bool = false,
 
@@ -129,33 +130,33 @@ pub const CliRenderer = struct {
     lastCursorColorRGB: ?[3]u8 = null,
     lastMousePointerStyle: Terminal.MousePointerStyle = .default,
 
-    // Preallocated output buffer
-    var outputBuffer: [OUTPUT_BUFFER_SIZE]u8 = undefined;
-    var outputBufferLen: usize = 0;
-    var outputBufferB: [OUTPUT_BUFFER_SIZE]u8 = undefined;
-    var outputBufferBLen: usize = 0;
-    var activeBuffer: enum { A, B } = .A;
+    // Per-instance output buffers (heap-allocated to support multiple renderers)
+    outputBufferA: []u8,
+    outputBufferALen: usize = 0,
+    outputBufferB: []u8,
+    outputBufferBLen: usize = 0,
+    activeOutputBuffer: enum { A, B } = .A,
 
     const OutputBufferWriter = struct {
-        pub fn write(_: void, data: []const u8) !usize {
-            const bufferLen = if (activeBuffer == .A) &outputBufferLen else &outputBufferBLen;
-            const buffer = if (activeBuffer == .A) &outputBuffer else &outputBufferB;
+        renderer: *CliRenderer,
+
+        pub fn write(self: OutputBufferWriter, data: []const u8) !usize {
+            const bufferLen = if (self.renderer.activeOutputBuffer == .A) &self.renderer.outputBufferALen else &self.renderer.outputBufferBLen;
+            const buffer = if (self.renderer.activeOutputBuffer == .A) self.renderer.outputBufferA else self.renderer.outputBufferB;
 
             if (bufferLen.* + data.len > buffer.len) {
                 // TODO: Resize buffer when necessary
                 return error.BufferFull;
             }
 
-            @memcpy(buffer.*[bufferLen.*..][0..data.len], data);
+            @memcpy(buffer[bufferLen.*..][0..data.len], data);
             bufferLen.* += data.len;
 
             return data.len;
         }
 
-        // TODO: std.io.GenericWriter is deprecated, however the "correct" option seems to be much more involved
-        // So I have simply used GenericWriter here, and then the proper migration can be done later
-        pub fn writer() std.io.GenericWriter(void, error{BufferFull}, write) {
-            return .{ .context = {} };
+        pub fn writer(self: OutputBufferWriter) std.io.GenericWriter(OutputBufferWriter, error{BufferFull}, write) {
+            return .{ .context = self };
         }
     };
 
@@ -202,6 +203,12 @@ pub const CliRenderer = struct {
         try stdoutWriteTime.ensureTotalCapacity(allocator, STAT_SAMPLE_CAPACITY);
         try cellsUpdated.ensureTotalCapacity(allocator, STAT_SAMPLE_CAPACITY);
         try frameCallbackTimes.ensureTotalCapacity(allocator, STAT_SAMPLE_CAPACITY);
+
+        // Per-instance output buffers for multi-renderer support
+        const outBufA = try allocator.alloc(u8, OUTPUT_BUFFER_SIZE);
+        errdefer allocator.free(outBufA);
+        const outBufB = try allocator.alloc(u8, OUTPUT_BUFFER_SIZE);
+        errdefer allocator.free(outBufB);
 
         const hitGridSize = width * height;
         const currentHitGrid = try allocator.alloc(u32, hitGridSize);
@@ -258,6 +265,9 @@ pub const CliRenderer = struct {
             .hitGridWidth = width,
             .hitGridHeight = height,
             .hitScissorStack = hitScissorStack,
+            .output_file = std.fs.File.stdout(),
+            .outputBufferA = outBufA,
+            .outputBufferB = outBufB,
         };
 
         try currentBuffer.clear(.{ self.backgroundColor[0], self.backgroundColor[1], self.backgroundColor[2], self.backgroundColor[3] }, CLEAR_CHAR);
@@ -298,6 +308,8 @@ pub const CliRenderer = struct {
         self.allocator.free(self.currentHitGrid);
         self.allocator.free(self.nextHitGrid);
         self.hitScissorStack.deinit(self.allocator);
+        self.allocator.free(self.outputBufferA);
+        self.allocator.free(self.outputBufferB);
 
         self.allocator.destroy(self);
     }
@@ -306,7 +318,7 @@ pub const CliRenderer = struct {
         self.useAlternateScreen = useAlternateScreen;
         self.terminalSetup = true;
 
-        var stdoutWriter = std.fs.File.stdout().writer(&self.stdoutBuffer);
+        var stdoutWriter = self.output_file.writer(&self.stdoutBuffer);
         const writer = &stdoutWriter.interface;
 
         self.terminal.queryTerminalSend(writer) catch {
@@ -318,7 +330,7 @@ pub const CliRenderer = struct {
     }
 
     fn setupTerminalWithoutDetection(self: *CliRenderer, useAlternateScreen: bool) void {
-        var stdoutWriter = std.fs.File.stdout().writer(&self.stdoutBuffer);
+        var stdoutWriter = self.output_file.writer(&self.stdoutBuffer);
         const writer = &stdoutWriter.interface;
 
         writer.writeAll(ansi.ANSI.saveCursorState) catch {};
@@ -349,7 +361,7 @@ pub const CliRenderer = struct {
     pub fn performShutdownSequence(self: *CliRenderer) void {
         if (!self.terminalSetup) return;
 
-        var stdoutWriter = std.fs.File.stdout().writer(&self.stdoutBuffer);
+        var stdoutWriter = self.output_file.writer(&self.stdoutBuffer);
         const direct = &stdoutWriter.interface;
         self.terminal.resetState(direct) catch {
             logger.warn("Failed to reset terminal state", .{});
@@ -516,7 +528,7 @@ pub const CliRenderer = struct {
             const writeStart = std.time.microTimestamp();
 
             if (outputLen > 0 and !self.testing) {
-                var stdoutWriter = std.fs.File.stdout().writer(&self.stdoutBuffer);
+                var stdoutWriter = self.output_file.writer(&self.stdoutBuffer);
                 const w = &stdoutWriter.interface;
                 w.writeAll(outputData[0..outputLen]) catch {};
                 w.flush() catch {};
@@ -547,14 +559,14 @@ pub const CliRenderer = struct {
                 self.renderCondition.wait(&self.renderMutex);
             }
 
-            if (activeBuffer == .A) {
-                activeBuffer = .B;
-                self.currentOutputBuffer = &outputBuffer;
-                self.currentOutputLen = outputBufferLen;
+            if (self.activeOutputBuffer == .A) {
+                self.activeOutputBuffer = .B;
+                self.currentOutputBuffer = self.outputBufferA;
+                self.currentOutputLen = self.outputBufferALen;
             } else {
-                activeBuffer = .A;
-                self.currentOutputBuffer = &outputBufferB;
-                self.currentOutputLen = outputBufferBLen;
+                self.activeOutputBuffer = .A;
+                self.currentOutputBuffer = self.outputBufferB;
+                self.currentOutputLen = self.outputBufferBLen;
             }
 
             self.renderRequested = true;
@@ -564,9 +576,9 @@ pub const CliRenderer = struct {
         } else {
             const writeStart = std.time.microTimestamp();
             if (!self.testing) {
-                var stdoutWriter = std.fs.File.stdout().writer(&self.stdoutBuffer);
+                var stdoutWriter = self.output_file.writer(&self.stdoutBuffer);
                 const w = &stdoutWriter.interface;
-                w.writeAll(outputBuffer[0..outputBufferLen]) catch {};
+                w.writeAll(self.outputBufferA[0..self.outputBufferALen]) catch {};
                 w.flush() catch {};
             }
             self.renderStats.stdoutWriteTime = @as(f64, @floatFromInt(std.time.microTimestamp() - writeStart));
@@ -600,13 +612,13 @@ pub const CliRenderer = struct {
         const renderStartTime = std.time.microTimestamp();
         var cellsUpdated: u32 = 0;
 
-        if (activeBuffer == .A) {
-            outputBufferLen = 0;
+        if (self.activeOutputBuffer == .A) {
+            self.outputBufferALen = 0;
         } else {
-            outputBufferBLen = 0;
+            self.outputBufferBLen = 0;
         }
 
-        var writer = OutputBufferWriter.writer();
+        var writer = (OutputBufferWriter{ .renderer = self }).writer();
 
         writer.writeAll(ansi.ANSI.syncSet) catch {};
         writer.writeAll(ansi.ANSI.hideCursor) catch {};
@@ -814,7 +826,7 @@ pub const CliRenderer = struct {
             ansi.ANSI.setMousePointerOutput(writer, mousePointer.toName()) catch {};
             self.lastMousePointerStyle = mousePointer;
         }
-        
+
         writer.writeAll(ansi.ANSI.syncReset) catch {};
 
         const renderEndTime = std.time.microTimestamp();
@@ -859,7 +871,7 @@ pub const CliRenderer = struct {
             self.renderMutex.unlock();
         }
 
-        var stdoutWriter = std.fs.File.stdout().writer(&self.stdoutBuffer);
+        var stdoutWriter = self.output_file.writer(&self.stdoutBuffer);
         const w = &stdoutWriter.interface;
         w.writeAll(data) catch {};
         w.flush() catch {};
@@ -883,7 +895,7 @@ pub const CliRenderer = struct {
 
         if (totalLen == 0) return;
 
-        var stdoutWriter = std.fs.File.stdout().writer(&self.stdoutBuffer);
+        var stdoutWriter = self.output_file.writer(&self.stdoutBuffer);
         const w = &stdoutWriter.interface;
         for (data_slices) |slice| {
             w.writeAll(slice) catch {};
@@ -1123,16 +1135,15 @@ pub const CliRenderer = struct {
         writer.flush() catch {};
     }
 
-    pub fn getLastOutputForTest(_: *CliRenderer) []const u8 {
+    pub fn getLastOutputForTest(self: *CliRenderer) []const u8 {
         // In non-threaded mode, we want the current active buffer
         // In threaded mode, we want the previously rendered buffer
-        const currentBuffer = if (activeBuffer == .A) &outputBuffer else &outputBufferB;
-        const currentLen = if (activeBuffer == .A) outputBufferLen else outputBufferBLen;
-        return currentBuffer.*[0..currentLen];
+        const currentBuffer = if (self.activeOutputBuffer == .A) self.outputBufferA else self.outputBufferB;
+        const currentLen = if (self.activeOutputBuffer == .A) self.outputBufferALen else self.outputBufferBLen;
+        return currentBuffer[0..currentLen];
     }
 
     pub fn dumpStdoutBuffer(self: *CliRenderer, timestamp: i64) void {
-        _ = self;
         std.fs.cwd().makeDir("buffer_dump") catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return,
@@ -1152,18 +1163,18 @@ pub const CliRenderer = struct {
         writer.writeAll("Last Rendered ANSI Output:\n") catch return;
         writer.writeAll("================\n") catch return;
 
-        const lastBuffer = if (activeBuffer == .A) &outputBufferB else &outputBuffer;
-        const lastLen = if (activeBuffer == .A) outputBufferBLen else outputBufferLen;
+        const lastBuffer = if (self.activeOutputBuffer == .A) self.outputBufferB else self.outputBufferA;
+        const lastLen = if (self.activeOutputBuffer == .A) self.outputBufferBLen else self.outputBufferALen;
 
         if (lastLen > 0) {
-            writer.writeAll(lastBuffer.*[0..lastLen]) catch return;
+            writer.writeAll(lastBuffer[0..lastLen]) catch return;
         } else {
             writer.writeAll("(no output rendered yet)\n") catch return;
         }
 
         writer.writeAll("\n================\n") catch return;
         writer.print("Buffer size: {d} bytes\n", .{lastLen}) catch return;
-        writer.print("Active buffer: {s}\n", .{if (activeBuffer == .A) "A" else "B"}) catch return;
+        writer.print("Active buffer: {s}\n", .{if (self.activeOutputBuffer == .A) "A" else "B"}) catch return;
         writer.flush() catch {};
     }
 

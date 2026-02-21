@@ -8,11 +8,12 @@ import {
   type TimelineOptions,
 } from "@opentui/core"
 import { createContext, createSignal, onCleanup, onMount, useContext } from "solid-js"
+import { getActiveRenderer } from "../renderer-stack"
 
 export const RendererContext = createContext<CliRenderer>()
 
 export const useRenderer = () => {
-  const renderer = useContext(RendererContext)
+  const renderer = useContext(RendererContext) ?? getActiveRenderer()
 
   if (!renderer) {
     throw new Error("No renderer found")
