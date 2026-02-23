@@ -11,7 +11,7 @@ export type InputAction = TextareaAction
 export type InputKeyBinding = TextareaKeyBinding
 
 export interface InputRenderableOptions
-  extends Omit<TextareaOptions, "height" | "minHeight" | "maxHeight" | "initialValue"> {
+  extends Omit<TextareaOptions, "initialValue"> {
   /** Initial text value (newlines are stripped) */
   value?: string
   /** Maximum number of characters allowed */
@@ -59,12 +59,12 @@ export class InputRenderable extends TextareaRenderable {
     const initialValue = rawValue.replace(/[\n\r]/g, "").substring(0, maxLength)
 
     super(ctx, {
+      // Single-line defaults (overridable by options)
+      height: 1,
+      wrapMode: "none",
       ...options,
       placeholder: options.placeholder ?? defaults.placeholder,
       initialValue,
-      // Single-line constraints
-      height: 1,
-      wrapMode: "none",
       // Override return/linefeed to submit instead of newline
       keyBindings: [
         { name: "return", action: "submit" },
