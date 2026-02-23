@@ -83,27 +83,30 @@ export class InputRenderable extends TextareaRenderable {
   }
 
   /**
-   * Prevent newlines in single-line input
+   * Prevent newlines in single-line input (allow when multiline via wrapMode)
    */
   public override newLine(): boolean {
+    if (this.wrapMode !== "none") {
+      return super.newLine()
+    }
     return false
   }
 
   /**
-   * Handle paste - strip newlines and enforce maxLength
+   * Handle paste - strip newlines in single-line mode and enforce maxLength
    */
   public override handlePaste(event: PasteEvent): void {
-    const sanitized = event.text.replace(/[\n\r]/g, "")
-    if (sanitized) {
-      this.insertText(sanitized)
+    const text = this.wrapMode !== "none" ? event.text : event.text.replace(/[\n\r]/g, "")
+    if (text) {
+      this.insertText(text)
     }
   }
 
   /**
-   * Insert text - strip newlines and enforce maxLength
+   * Insert text - strip newlines in single-line mode and enforce maxLength
    */
   public override insertText(text: string): void {
-    const sanitized = text.replace(/[\n\r]/g, "")
+    const sanitized = this.wrapMode !== "none" ? text : text.replace(/[\n\r]/g, "")
     if (!sanitized) return
 
     const currentLength = this.plainText.length
@@ -120,7 +123,8 @@ export class InputRenderable extends TextareaRenderable {
   }
 
   public set value(value: string) {
-    const newValue = value.substring(0, this._maxLength).replace(/[\n\r]/g, "")
+    const stripped = this.wrapMode !== "none" ? value : value.replace(/[\n\r]/g, "")
+    const newValue = stripped.substring(0, this._maxLength)
     const currentValue = this.plainText
     if (currentValue !== newValue) {
       this.setText(newValue)
