@@ -98,10 +98,6 @@ async function setupTestRenderer(config: TestRendererOptions) {
   if (config.useThread === undefined) {
     config.useThread = true
   }
-
-  if (process.platform === "linux") {
-    config.useThread = false
-  }
   ziglib.setUseThread(rendererPtr, config.useThread)
 
   const renderer = new CliRenderer(ziglib, rendererPtr, stdin, stdout, width, height, config)
