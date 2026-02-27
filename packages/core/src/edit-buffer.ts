@@ -24,6 +24,7 @@ export class EditBuffer extends EventEmitter {
   private _singleTextBytes: Uint8Array | null = null
   private _singleTextMemId: number | null = null
   private _syntaxStyle?: SyntaxStyle
+  private _textCache: string | null = null
 
   constructor(lib: RenderLib, ptr: Pointer) {
     super()
@@ -34,6 +35,11 @@ export class EditBuffer extends EventEmitter {
 
     EditBuffer.registry.set(this.id, this)
     EditBuffer.subscribeToNativeEvents(lib)
+
+    // Invalidate getText() cache when native content changes
+    this.on("content-changed", () => {
+      this._textCache = null
+    })
   }
 
   static create(widthMethod: WidthMethod): EditBuffer {
@@ -76,8 +82,13 @@ export class EditBuffer extends EventEmitter {
    * Set text and completely reset the buffer state (clears history, resets add_buffer).
    * Use this for initial text setting or when you want a clean slate.
    */
+  private invalidateTextCache(): void {
+    this._textCache = null
+  }
+
   public setText(text: string): void {
     this.guard()
+    this.invalidateTextCache()
     const textBytes = this.lib.encoder.encode(text)
 
     if (this._singleTextMemId !== null) {
@@ -95,6 +106,7 @@ export class EditBuffer extends EventEmitter {
    */
   public setTextOwned(text: string): void {
     this.guard()
+    this.invalidateTextCache()
     const textBytes = this.lib.encoder.encode(text)
     this.lib.editBufferSetText(this.bufferPtr, textBytes)
   }
@@ -105,6 +117,7 @@ export class EditBuffer extends EventEmitter {
    */
   public replaceText(text: string): void {
     this.guard()
+    this.invalidateTextCache()
     const textBytes = this.lib.encoder.encode(text)
     this._textBytes.push(textBytes)
     const memId = this.lib.textBufferRegisterMemBuffer(this.textBufferPtr, textBytes, false)
@@ -117,6 +130,7 @@ export class EditBuffer extends EventEmitter {
    */
   public replaceTextOwned(text: string): void {
     this.guard()
+    this.invalidateTextCache()
     const textBytes = this.lib.encoder.encode(text)
     this.lib.editBufferReplaceText(this.bufferPtr, textBytes)
   }
@@ -128,48 +142,61 @@ export class EditBuffer extends EventEmitter {
 
   public getText(): string {
     this.guard()
+    if (this._textCache !== null) return this._textCache
+
     // TODO: Use byte size of text buffer to get the actual size of the text
     // actually native can stack alloc all the text and decode will alloc as js string then
     const maxSize = 1024 * 1024 // 1MB max
     const textBytes = this.lib.editBufferGetText(this.bufferPtr, maxSize)
 
-    if (!textBytes) return ""
+    if (!textBytes) {
+      this._textCache = ""
+      return ""
+    }
 
-    return this.lib.decoder.decode(textBytes)
+    this._textCache = this.lib.decoder.decode(textBytes)
+    return this._textCache
   }
 
   public insertChar(char: string): void {
     this.guard()
+    this.invalidateTextCache()
     this.lib.editBufferInsertChar(this.bufferPtr, char)
   }
 
   public insertText(text: string): void {
     this.guard()
+    this.invalidateTextCache()
     this.lib.editBufferInsertText(this.bufferPtr, text)
   }
 
   public deleteChar(): void {
     this.guard()
+    this.invalidateTextCache()
     this.lib.editBufferDeleteChar(this.bufferPtr)
   }
 
   public deleteCharBackward(): void {
     this.guard()
+    this.invalidateTextCache()
     this.lib.editBufferDeleteCharBackward(this.bufferPtr)
   }
 
   public deleteRange(startLine: number, startCol: number, endLine: number, endCol: number): void {
     this.guard()
+    this.invalidateTextCache()
     this.lib.editBufferDeleteRange(this.bufferPtr, startLine, startCol, endLine, endCol)
   }
 
   public newLine(): void {
     this.guard()
+    this.invalidateTextCache()
     this.lib.editBufferNewLine(this.bufferPtr)
   }
 
   public deleteLine(): void {
     this.guard()
+    this.invalidateTextCache()
     this.lib.editBufferDeleteLine(this.bufferPtr)
   }
 
@@ -306,6 +333,7 @@ export class EditBuffer extends EventEmitter {
 
   public undo(): string | null {
     this.guard()
+    this.invalidateTextCache()
     const maxSize = 256
     const metaBytes = this.lib.editBufferUndo(this.bufferPtr, maxSize)
     if (!metaBytes) return null
@@ -314,6 +342,7 @@ export class EditBuffer extends EventEmitter {
 
   public redo(): string | null {
     this.guard()
+    this.invalidateTextCache()
     const maxSize = 256
     const metaBytes = this.lib.editBufferRedo(this.bufferPtr, maxSize)
     if (!metaBytes) return null
@@ -398,6 +427,7 @@ export class EditBuffer extends EventEmitter {
 
   public clear(): void {
     this.guard()
+    this.invalidateTextCache()
     this.lib.editBufferClear(this.bufferPtr)
   }
 
