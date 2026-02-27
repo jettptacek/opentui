@@ -803,7 +803,7 @@ export class CliRenderer extends EventEmitter implements RenderContext {
       this.updateScheduled = true
       const now = Date.now()
       const elapsed = now - this.lastTime
-      const delay = Math.max(this.minTargetFrameTime - elapsed, 0)
+      const delay = Math.max(this.targetFrameTime - elapsed, 0)
 
       if (delay === 0) {
         process.nextTick(() => this.activateFrame())
@@ -2006,7 +2006,7 @@ export class CliRenderer extends EventEmitter implements RenderContext {
         }
 
         if (this._isRunning || this.immediateRerenderRequested) {
-          const targetFrameTime = this.immediateRerenderRequested ? this.minTargetFrameTime : this.targetFrameTime
+          const targetFrameTime = this.targetFrameTime
           const delay = Math.max(1, targetFrameTime - Math.floor(overallFrameTime))
           this.immediateRerenderRequested = false
           this.renderTimeout = setTimeout(() => {
