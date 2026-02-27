@@ -777,6 +777,12 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     return this.realStdoutWrite.call(this.stdout, chunk, encoding, callback)
   }
 
+  /** Update the target frames-per-second at runtime (e.g. for adaptive load scaling) */
+  public setTargetFps(fps: number) {
+    this.targetFps = Math.max(1, Math.min(fps, this.maxFps))
+    this.targetFrameTime = 1000 / this.targetFps
+  }
+
   public requestRender() {
     if (this._controlState === RendererControlState.EXPLICIT_SUSPENDED) {
       return
