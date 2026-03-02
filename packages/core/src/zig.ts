@@ -1810,6 +1810,8 @@ class FFIRenderLib implements RenderLib {
   private eventCallbackWrapper: any // Store the FFI event callback wrapper
   private _nativeEvents: EventEmitter = new EventEmitter()
   private _anyEventHandlers: Array<(name: string, data: ArrayBuffer) => void> = []
+  // Reusable buffer for editBufferGetText to avoid 1MB allocation per call
+  private _getTextBuffer: Uint8Array = new Uint8Array(4096)
   private nativeSpanFeedCallbackWrapper: JSCallback | null = null
   private nativeSpanFeedHandlers = new Map<Pointer, NativeSpanFeedEventHandler>()
 
@@ -2638,7 +2640,10 @@ class FFIRenderLib implements RenderLib {
   }
 
   public getPlainTextBytes(buffer: Pointer, maxLength: number): Uint8Array | null {
-    const outBuffer = new Uint8Array(maxLength)
+    if (this._getTextBuffer.length < maxLength) {
+      this._getTextBuffer = new Uint8Array(maxLength)
+    }
+    const outBuffer = this._getTextBuffer
 
     const actualLen = this.textBufferGetPlainText(buffer, ptr(outBuffer), maxLength)
 
@@ -2646,7 +2651,7 @@ class FFIRenderLib implements RenderLib {
       return null
     }
 
-    return outBuffer.slice(0, actualLen)
+    return outBuffer.subarray(0, actualLen)
   }
 
   public textBufferGetTextRange(
@@ -2655,7 +2660,10 @@ class FFIRenderLib implements RenderLib {
     endOffset: number,
     maxLength: number,
   ): Uint8Array | null {
-    const outBuffer = new Uint8Array(maxLength)
+    if (this._getTextBuffer.length < maxLength) {
+      this._getTextBuffer = new Uint8Array(maxLength)
+    }
+    const outBuffer = this._getTextBuffer
 
     const actualLen = this.opentui.symbols.textBufferGetTextRange(
       buffer,
@@ -2671,7 +2679,7 @@ class FFIRenderLib implements RenderLib {
       return null
     }
 
-    return outBuffer.slice(0, len)
+    return outBuffer.subarray(0, len)
   }
 
   public textBufferGetTextRangeByCoords(
@@ -2682,7 +2690,10 @@ class FFIRenderLib implements RenderLib {
     endCol: number,
     maxLength: number,
   ): Uint8Array | null {
-    const outBuffer = new Uint8Array(maxLength)
+    if (this._getTextBuffer.length < maxLength) {
+      this._getTextBuffer = new Uint8Array(maxLength)
+    }
+    const outBuffer = this._getTextBuffer
 
     const actualLen = this.opentui.symbols.textBufferGetTextRangeByCoords(
       buffer,
@@ -2700,7 +2711,7 @@ class FFIRenderLib implements RenderLib {
       return null
     }
 
-    return outBuffer.slice(0, len)
+    return outBuffer.subarray(0, len)
   }
 
   // TextBufferView methods
@@ -2854,7 +2865,10 @@ class FFIRenderLib implements RenderLib {
   }
 
   public textBufferViewGetSelectedTextBytes(view: Pointer, maxLength: number): Uint8Array | null {
-    const outBuffer = new Uint8Array(maxLength)
+    if (this._getTextBuffer.length < maxLength) {
+      this._getTextBuffer = new Uint8Array(maxLength)
+    }
+    const outBuffer = this._getTextBuffer
 
     const actualLen = this.textBufferViewGetSelectedText(view, ptr(outBuffer), maxLength)
 
@@ -2862,11 +2876,14 @@ class FFIRenderLib implements RenderLib {
       return null
     }
 
-    return outBuffer.slice(0, actualLen)
+    return outBuffer.subarray(0, actualLen)
   }
 
   public textBufferViewGetPlainTextBytes(view: Pointer, maxLength: number): Uint8Array | null {
-    const outBuffer = new Uint8Array(maxLength)
+    if (this._getTextBuffer.length < maxLength) {
+      this._getTextBuffer = new Uint8Array(maxLength)
+    }
+    const outBuffer = this._getTextBuffer
 
     const actualLen = this.textBufferViewGetPlainText(view, ptr(outBuffer), maxLength)
 
@@ -2874,7 +2891,7 @@ class FFIRenderLib implements RenderLib {
       return null
     }
 
-    return outBuffer.slice(0, actualLen)
+    return outBuffer.subarray(0, actualLen)
   }
 
   public textBufferViewSetTabIndicator(view: Pointer, indicator: number): void {
@@ -3089,11 +3106,15 @@ class FFIRenderLib implements RenderLib {
   }
 
   public editBufferGetText(buffer: Pointer, maxLength: number): Uint8Array | null {
-    const outBuffer = new Uint8Array(maxLength)
+    // Reuse a shared buffer, growing only when needed
+    if (this._getTextBuffer.length < maxLength) {
+      this._getTextBuffer = new Uint8Array(maxLength)
+    }
+    const outBuffer = this._getTextBuffer
     const actualLen = this.opentui.symbols.editBufferGetText(buffer, ptr(outBuffer), maxLength)
     const len = typeof actualLen === "bigint" ? Number(actualLen) : actualLen
     if (len === 0) return null
-    return outBuffer.slice(0, len)
+    return outBuffer.subarray(0, len)
   }
 
   public editBufferInsertChar(buffer: Pointer, char: string): void {
@@ -3187,19 +3208,25 @@ class FFIRenderLib implements RenderLib {
   }
 
   public editBufferUndo(buffer: Pointer, maxLength: number): Uint8Array | null {
-    const outBuffer = new Uint8Array(maxLength)
+    if (this._getTextBuffer.length < maxLength) {
+      this._getTextBuffer = new Uint8Array(maxLength)
+    }
+    const outBuffer = this._getTextBuffer
     const actualLen = this.opentui.symbols.editBufferUndo(buffer, ptr(outBuffer), maxLength)
     const len = typeof actualLen === "bigint" ? Number(actualLen) : actualLen
     if (len === 0) return null
-    return outBuffer.slice(0, len)
+    return outBuffer.subarray(0, len)
   }
 
   public editBufferRedo(buffer: Pointer, maxLength: number): Uint8Array | null {
-    const outBuffer = new Uint8Array(maxLength)
+    if (this._getTextBuffer.length < maxLength) {
+      this._getTextBuffer = new Uint8Array(maxLength)
+    }
+    const outBuffer = this._getTextBuffer
     const actualLen = this.opentui.symbols.editBufferRedo(buffer, ptr(outBuffer), maxLength)
     const len = typeof actualLen === "bigint" ? Number(actualLen) : actualLen
     if (len === 0) return null
-    return outBuffer.slice(0, len)
+    return outBuffer.subarray(0, len)
   }
 
   public editBufferCanUndo(buffer: Pointer): boolean {
@@ -3257,7 +3284,10 @@ class FFIRenderLib implements RenderLib {
     endOffset: number,
     maxLength: number,
   ): Uint8Array | null {
-    const outBuffer = new Uint8Array(maxLength)
+    if (this._getTextBuffer.length < maxLength) {
+      this._getTextBuffer = new Uint8Array(maxLength)
+    }
+    const outBuffer = this._getTextBuffer
     const actualLen = this.opentui.symbols.editBufferGetTextRange(
       buffer,
       startOffset,
@@ -3267,7 +3297,7 @@ class FFIRenderLib implements RenderLib {
     )
     const len = typeof actualLen === "bigint" ? Number(actualLen) : actualLen
     if (len === 0) return null
-    return outBuffer.slice(0, len)
+    return outBuffer.subarray(0, len)
   }
 
   public editBufferGetTextRangeByCoords(
@@ -3278,7 +3308,10 @@ class FFIRenderLib implements RenderLib {
     endCol: number,
     maxLength: number,
   ): Uint8Array | null {
-    const outBuffer = new Uint8Array(maxLength)
+    if (this._getTextBuffer.length < maxLength) {
+      this._getTextBuffer = new Uint8Array(maxLength)
+    }
+    const outBuffer = this._getTextBuffer
     const actualLen = this.opentui.symbols.editBufferGetTextRangeByCoords(
       buffer,
       startRow,
@@ -3290,7 +3323,7 @@ class FFIRenderLib implements RenderLib {
     )
     const len = typeof actualLen === "bigint" ? Number(actualLen) : actualLen
     if (len === 0) return null
-    return outBuffer.slice(0, len)
+    return outBuffer.subarray(0, len)
   }
 
   // EditorView selection and editing implementations
@@ -3383,11 +3416,14 @@ class FFIRenderLib implements RenderLib {
   }
 
   public editorViewGetSelectedTextBytes(view: Pointer, maxLength: number): Uint8Array | null {
-    const outBuffer = new Uint8Array(maxLength)
+    if (this._getTextBuffer.length < maxLength) {
+      this._getTextBuffer = new Uint8Array(maxLength)
+    }
+    const outBuffer = this._getTextBuffer
     const actualLen = this.opentui.symbols.editorViewGetSelectedTextBytes(view, ptr(outBuffer), maxLength)
     const len = typeof actualLen === "bigint" ? Number(actualLen) : actualLen
     if (len === 0) return null
-    return outBuffer.slice(0, len)
+    return outBuffer.subarray(0, len)
   }
 
   public editorViewGetCursor(view: Pointer): { row: number; col: number } {
@@ -3398,11 +3434,14 @@ class FFIRenderLib implements RenderLib {
   }
 
   public editorViewGetText(view: Pointer, maxLength: number): Uint8Array | null {
-    const outBuffer = new Uint8Array(maxLength)
+    if (this._getTextBuffer.length < maxLength) {
+      this._getTextBuffer = new Uint8Array(maxLength)
+    }
+    const outBuffer = this._getTextBuffer
     const actualLen = this.opentui.symbols.editorViewGetText(view, ptr(outBuffer), maxLength)
     const len = typeof actualLen === "bigint" ? Number(actualLen) : actualLen
     if (len === 0) return null
-    return outBuffer.slice(0, len)
+    return outBuffer.subarray(0, len)
   }
 
   public editorViewGetVisualCursor(view: Pointer): VisualCursor {

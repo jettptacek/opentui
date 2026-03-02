@@ -144,9 +144,11 @@ export class EditBuffer extends EventEmitter {
     this.guard()
     if (this._textCache !== null) return this._textCache
 
-    // TODO: Use byte size of text buffer to get the actual size of the text
-    // actually native can stack alloc all the text and decode will alloc as js string then
-    const maxSize = 1024 * 1024 // 1MB max
+    // Use the actual byte size from the native text buffer instead of
+    // always allocating 1MB. getByteSize() is O(1) on the rope and
+    // already includes newline bytes between lines.
+    const byteSize = this.lib.textBufferGetByteSize(this.textBufferPtr)
+    const maxSize = byteSize + 1
     const textBytes = this.lib.editBufferGetText(this.bufferPtr, maxSize)
 
     if (!textBytes) {
@@ -296,11 +298,9 @@ export class EditBuffer extends EventEmitter {
     this.guard()
     if (startOffset >= endOffset) return ""
 
-    // TODO: Use actual expected size of the text
-    // like other methods native can just return a pointer and size
-    // and we immediately decode the text into a js string then the native stack
-    // can go out of scope
-    const maxSize = 1024 * 1024 // 1MB max
+    // Upper bound: endOffset - startOffset gives character count,
+    // multiply by 4 for max UTF-8 bytes per character, plus newlines
+    const maxSize = (endOffset - startOffset) * 4 + 1
     const textBytes = this.lib.editBufferGetTextRange(this.bufferPtr, startOffset, endOffset, maxSize)
 
     if (!textBytes) return ""
@@ -311,7 +311,10 @@ export class EditBuffer extends EventEmitter {
   public getTextRangeByCoords(startRow: number, startCol: number, endRow: number, endCol: number): string {
     this.guard()
 
-    const maxSize = 1024 * 1024 // 1MB max
+    // Use full buffer byte size as upper bound since we don't know the
+    // exact byte range from row/col coordinates
+    const byteSize = this.lib.textBufferGetByteSize(this.textBufferPtr)
+    const maxSize = byteSize + 1
     const textBytes = this.lib.editBufferGetTextRangeByCoords(
       this.bufferPtr,
       startRow,
