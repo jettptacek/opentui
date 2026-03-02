@@ -410,6 +410,28 @@ pub const OptimizedBuffer = struct {
         @memset(self.buffer.bg, bg);
     }
 
+    // Copy all cell data from another buffer of the same dimensions.
+    // Used for copy-on-frame optimization: instead of clearing nextRenderBuffer
+    // each frame, we copy currentRenderBuffer into it so that clean renderables
+    // can skip their renderSelf() — their pixels are already present from the copy.
+    // Grapheme and link trackers are cleared (not copied) since the tracker
+    // ownership semantics don't transfer; stale grapheme/link markers in the
+    // copied cell data are harmless because clean renderables won't overwrite
+    // them, and dirty renderables will re-render properly.
+    pub fn copyFrom(self: *OptimizedBuffer, src: *const OptimizedBuffer) void {
+        if (self.width != src.width or self.height != src.height) return;
+
+        const size = self.width * self.height;
+
+        self.link_tracker.clear();
+        self.grapheme_tracker.clear();
+
+        @memcpy(self.buffer.char[0..size], src.buffer.char[0..size]);
+        @memcpy(self.buffer.fg[0..size], src.buffer.fg[0..size]);
+        @memcpy(self.buffer.bg[0..size], src.buffer.bg[0..size]);
+        @memcpy(self.buffer.attributes[0..size], src.buffer.attributes[0..size]);
+    }
+
     pub fn setRaw(self: *OptimizedBuffer, x: u32, y: u32, cell: Cell) void {
         if (x >= self.width or y >= self.height) return;
         if (!self.isPointInScissor(@intCast(x), @intCast(y))) return;

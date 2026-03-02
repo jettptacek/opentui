@@ -331,7 +331,7 @@ export const {
       case "style":
         for (const prop in value) {
           const propVal = value[prop]
-          if (prev !== undefined && propVal === prev[prop]) continue
+          if (prev && propVal === prev[prop]) continue
           // @ts-expect-error todo validate if prop is actually settable
           node[prop] = propVal
         }
@@ -342,6 +342,7 @@ export const {
         node[name] = typeof value === "string" ? value : Array.isArray(value) ? value.join("") : `${value}`
         break
       default:
+        if (value === prev) break
         // @ts-expect-error todo validate if prop is actually settable
         node[name] = value
     }

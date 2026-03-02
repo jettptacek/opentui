@@ -261,21 +261,27 @@ export class TextNodeRenderable extends BaseRenderable {
 
   public set fg(fg: RGBA | string | undefined) {
     if (!fg) {
+      if (this._fg === undefined) return
       this._fg = undefined
       this.requestRender()
       return
     }
-    this._fg = parseColor(fg)
+    const newColor = parseColor(fg)
+    if (this._fg?.equals(newColor)) return
+    this._fg = newColor
     this.requestRender()
   }
 
   public set bg(bg: RGBA | string | undefined) {
     if (!bg) {
+      if (this._bg === undefined) return
       this._bg = undefined
       this.requestRender()
       return
     }
-    this._bg = parseColor(bg)
+    const newColor = parseColor(bg)
+    if (this._bg?.equals(newColor)) return
+    this._bg = newColor
     this.requestRender()
   }
 
@@ -284,6 +290,7 @@ export class TextNodeRenderable extends BaseRenderable {
   }
 
   public set attributes(attributes: number) {
+    if (this._attributes === attributes) return
     this._attributes = attributes
     this.requestRender()
   }

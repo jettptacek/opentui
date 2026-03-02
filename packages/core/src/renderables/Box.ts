@@ -1,6 +1,6 @@
 import { Edge, Gutter } from "yoga-layout"
 import { type RenderableOptions, Renderable } from "../Renderable"
-import type { OptimizedBuffer } from "../buffer"
+import { OptimizedBuffer } from "../buffer"
 import {
   type BorderCharacters,
   type BorderSides,
@@ -52,6 +52,7 @@ export class BoxRenderable extends Renderable {
   public shouldFill: boolean
   protected _title?: string
   protected _titleAlignment: "left" | "center" | "right"
+  private _boxCache: OptimizedBuffer | null = null
 
   protected _defaultOptions = {
     backgroundColor: "transparent",
@@ -125,7 +126,7 @@ export class BoxRenderable extends Renderable {
 
   public set backgroundColor(value: RGBA | string | undefined) {
     const newColor = parseColor(value ?? this._defaultOptions.backgroundColor)
-    if (this._backgroundColor !== newColor) {
+    if (!this._backgroundColor.equals(newColor)) {
       this._backgroundColor = newColor
       this.requestRender()
     }
@@ -164,7 +165,7 @@ export class BoxRenderable extends Renderable {
 
   public set borderColor(value: RGBA | string) {
     const newColor = parseColor(value ?? this._defaultOptions.borderColor)
-    if (this._borderColor !== newColor) {
+    if (!this._borderColor.equals(newColor)) {
       this._borderColor = newColor
       this.initializeBorder()
       this.requestRender()
@@ -177,7 +178,7 @@ export class BoxRenderable extends Renderable {
 
   public set focusedBorderColor(value: RGBA | string) {
     const newColor = parseColor(value ?? this._defaultOptions.focusedBorderColor)
-    if (this._focusedBorderColor !== newColor) {
+    if (!this._focusedBorderColor.equals(newColor)) {
       this._focusedBorderColor = newColor
       this.initializeBorder()
       if (this._focused) {
@@ -209,22 +210,71 @@ export class BoxRenderable extends Renderable {
   }
 
   protected renderSelf(buffer: OptimizedBuffer): void {
+    const w = this.width
+    const h = this.height
+    const hasBorder = this._border !== false
+    const isTransparent = this._backgroundColor.a < 1.0
+
+    // Skip drawBox entirely for layout-only boxes (no border, transparent bg)
+    if (!hasBorder && isTransparent) return
+
+    // Skip the expensive fillRect for transparent backgrounds — the
+    // per-cell alpha blending is a no-op when alpha is 0.
+    const effectiveShouldFill = this.shouldFill && !isTransparent
+
+    const canCache = effectiveShouldFill && this._backgroundColor.a >= 1.0
     const currentBorderColor = this._focused ? this._focusedBorderColor : this._borderColor
 
-    buffer.drawBox({
-      x: this.x,
-      y: this.y,
-      width: this.width,
-      height: this.height,
-      borderStyle: this._borderStyle,
-      customBorderChars: this._customBorderChars,
-      border: this._border,
-      borderColor: currentBorderColor,
-      backgroundColor: this._backgroundColor,
-      shouldFill: this.shouldFill,
-      title: this._title,
-      titleAlignment: this._titleAlignment,
-    })
+    // When clean and cache is valid, blit instead of calling the expensive drawBox FFI
+    if (!this._dirty && canCache && this._boxCache && this._boxCache.width === w && this._boxCache.height === h) {
+      buffer.drawFrameBuffer(this.x, this.y, this._boxCache)
+      return
+    }
+
+    if (canCache && w > 0 && h > 0) {
+      // Ensure cache buffer exists and is sized correctly
+      if (!this._boxCache || this._boxCache.width !== w || this._boxCache.height !== h) {
+        this._boxCache?.destroy()
+        this._boxCache = OptimizedBuffer.create(w, h, this._ctx.widthMethod, { id: `box-cache-${this.id}` })
+      }
+
+      // Render into cache at local (0,0), then blit to main buffer
+      this._boxCache.drawBox({
+        x: 0,
+        y: 0,
+        width: w,
+        height: h,
+        borderStyle: this._borderStyle,
+        customBorderChars: this._customBorderChars,
+        border: this._border,
+        borderColor: currentBorderColor,
+        backgroundColor: this._backgroundColor,
+        shouldFill: effectiveShouldFill,
+        title: this._title,
+        titleAlignment: this._titleAlignment,
+      })
+      buffer.drawFrameBuffer(this.x, this.y, this._boxCache)
+    } else {
+      // Non-cacheable boxes (transparent bg with borders): render directly
+      if (this._boxCache) {
+        this._boxCache.destroy()
+        this._boxCache = null
+      }
+      buffer.drawBox({
+        x: this.x,
+        y: this.y,
+        width: w,
+        height: h,
+        borderStyle: this._borderStyle,
+        customBorderChars: this._customBorderChars,
+        border: this._border,
+        borderColor: currentBorderColor,
+        backgroundColor: this._backgroundColor,
+        shouldFill: effectiveShouldFill,
+        title: this._title,
+        titleAlignment: this._titleAlignment,
+      })
+    }
   }
 
   protected getScissorRect(): { x: number; y: number; width: number; height: number } {
@@ -291,5 +341,13 @@ export class BoxRenderable extends Renderable {
       this.yogaNode.setGap(Gutter.Column, columnGap)
       this.requestRender()
     }
+  }
+
+  public destroy(): void {
+    if (this._boxCache) {
+      this._boxCache.destroy()
+      this._boxCache = null
+    }
+    super.destroy()
   }
 }
