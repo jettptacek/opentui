@@ -364,8 +364,9 @@ export class ArrowRenderable extends Renderable {
   }
 
   set foregroundColor(value: ColorInput) {
-    if (this._foregroundColor !== value) {
-      this._foregroundColor = parseColor(value)
+    const newColor = parseColor(value)
+    if (!this._foregroundColor.equals(newColor)) {
+      this._foregroundColor = newColor
       this.requestRender()
     }
   }
@@ -375,8 +376,9 @@ export class ArrowRenderable extends Renderable {
   }
 
   set backgroundColor(value: ColorInput) {
-    if (this._backgroundColor !== value) {
-      this._backgroundColor = parseColor(value)
+    const newColor = parseColor(value)
+    if (!this._backgroundColor.equals(newColor)) {
+      this._backgroundColor = newColor
       this.requestRender()
     }
   }

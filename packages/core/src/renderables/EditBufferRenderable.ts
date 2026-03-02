@@ -198,7 +198,7 @@ export abstract class EditBufferRenderable extends Renderable implements LineInf
 
   set textColor(value: RGBA | string | undefined) {
     const newColor = parseColor(value ?? this._defaultOptions.textColor)
-    if (this._textColor !== newColor) {
+    if (!this._textColor.equals(newColor)) {
       this._textColor = newColor
       this.editBuffer.setDefaultFg(newColor)
       this.requestRender()
@@ -211,7 +211,7 @@ export abstract class EditBufferRenderable extends Renderable implements LineInf
 
   set selectionBg(value: RGBA | string | undefined) {
     const newColor = value ? parseColor(value) : this._defaultOptions.selectionBg
-    if (this._selectionBg !== newColor) {
+    if (this._selectionBg !== newColor && !this._selectionBg?.equals(newColor)) {
       this._selectionBg = newColor
       if (this.lastLocalSelection) {
         this.updateLocalSelection(this.lastLocalSelection)
@@ -226,7 +226,7 @@ export abstract class EditBufferRenderable extends Renderable implements LineInf
 
   set selectionFg(value: RGBA | string | undefined) {
     const newColor = value ? parseColor(value) : this._defaultOptions.selectionFg
-    if (this._selectionFg !== newColor) {
+    if (this._selectionFg !== newColor && !this._selectionFg?.equals(newColor)) {
       this._selectionFg = newColor
       if (this.lastLocalSelection) {
         this.updateLocalSelection(this.lastLocalSelection)
@@ -241,7 +241,7 @@ export abstract class EditBufferRenderable extends Renderable implements LineInf
 
   set backgroundColor(value: RGBA | string | undefined) {
     const newColor = parseColor(value ?? this._defaultOptions.backgroundColor)
-    if (this._backgroundColor !== newColor) {
+    if (!this._backgroundColor.equals(newColor)) {
       this._backgroundColor = newColor
       this.editBuffer.setDefaultBg(newColor)
       this.requestRender()
@@ -293,7 +293,7 @@ export abstract class EditBufferRenderable extends Renderable implements LineInf
 
   set cursorColor(value: RGBA | string) {
     const newColor = parseColor(value)
-    if (this._cursorColor !== newColor) {
+    if (!this._cursorColor.equals(newColor)) {
       this._cursorColor = newColor
       if (this._focused) {
         this.requestRender()
@@ -335,7 +335,7 @@ export abstract class EditBufferRenderable extends Renderable implements LineInf
 
   set tabIndicatorColor(value: RGBA | string | undefined) {
     const newColor = value ? parseColor(value) : undefined
-    if (this._tabIndicatorColor !== newColor) {
+    if (this._tabIndicatorColor !== newColor && !this._tabIndicatorColor?.equals(newColor)) {
       this._tabIndicatorColor = newColor
       if (newColor !== undefined) {
         this.editorView.setTabIndicatorColor(newColor)

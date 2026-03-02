@@ -206,7 +206,7 @@ export abstract class TextBufferRenderable extends Renderable implements LineInf
 
   set fg(value: RGBA | string | undefined) {
     const newColor = parseColor(value ?? this._defaultOptions.fg)
-    if (this._defaultFg !== newColor) {
+    if (!this._defaultFg.equals(newColor)) {
       this._defaultFg = newColor
       this.textBuffer.setDefaultFg(this._defaultFg)
       this.onFgChanged(newColor)
@@ -220,7 +220,7 @@ export abstract class TextBufferRenderable extends Renderable implements LineInf
 
   set selectionBg(value: RGBA | string | undefined) {
     const newColor = value ? parseColor(value) : this._defaultOptions.selectionBg
-    if (this._selectionBg !== newColor) {
+    if (this._selectionBg !== newColor && !this._selectionBg?.equals(newColor)) {
       this._selectionBg = newColor
       if (this.lastLocalSelection) {
         this.updateLocalSelection(this.lastLocalSelection)
@@ -235,7 +235,7 @@ export abstract class TextBufferRenderable extends Renderable implements LineInf
 
   set selectionFg(value: RGBA | string | undefined) {
     const newColor = value ? parseColor(value) : this._defaultOptions.selectionFg
-    if (this._selectionFg !== newColor) {
+    if (this._selectionFg !== newColor && !this._selectionFg?.equals(newColor)) {
       this._selectionFg = newColor
       if (this.lastLocalSelection) {
         this.updateLocalSelection(this.lastLocalSelection)
@@ -250,7 +250,7 @@ export abstract class TextBufferRenderable extends Renderable implements LineInf
 
   set bg(value: RGBA | string | undefined) {
     const newColor = parseColor(value ?? this._defaultOptions.bg)
-    if (this._defaultBg !== newColor) {
+    if (!this._defaultBg.equals(newColor)) {
       this._defaultBg = newColor
       this.textBuffer.setDefaultBg(this._defaultBg)
       this.onBgChanged(newColor)
@@ -308,7 +308,7 @@ export abstract class TextBufferRenderable extends Renderable implements LineInf
 
   set tabIndicatorColor(value: RGBA | string | undefined) {
     const newColor = value ? parseColor(value) : undefined
-    if (this._tabIndicatorColor !== newColor) {
+    if (this._tabIndicatorColor !== newColor && !this._tabIndicatorColor?.equals(newColor)) {
       this._tabIndicatorColor = newColor
       if (newColor !== undefined) {
         this.textBufferView.setTabIndicatorColor(newColor)

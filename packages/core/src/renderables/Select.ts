@@ -402,7 +402,7 @@ export class SelectRenderable extends Renderable {
 
   public set backgroundColor(value: ColorInput) {
     const newColor = parseColor(value ?? this._defaultOptions.backgroundColor)
-    if (this._backgroundColor !== newColor) {
+    if (!this._backgroundColor.equals(newColor)) {
       this._backgroundColor = newColor
       this.requestRender()
     }
@@ -410,7 +410,7 @@ export class SelectRenderable extends Renderable {
 
   public set textColor(value: ColorInput) {
     const newColor = parseColor(value ?? this._defaultOptions.textColor)
-    if (this._textColor !== newColor) {
+    if (!this._textColor.equals(newColor)) {
       this._textColor = newColor
       this.requestRender()
     }
@@ -418,7 +418,7 @@ export class SelectRenderable extends Renderable {
 
   public set focusedBackgroundColor(value: ColorInput) {
     const newColor = parseColor(value ?? this._defaultOptions.focusedBackgroundColor)
-    if (this._focusedBackgroundColor !== newColor) {
+    if (!this._focusedBackgroundColor.equals(newColor)) {
       this._focusedBackgroundColor = newColor
       this.requestRender()
     }
@@ -426,7 +426,7 @@ export class SelectRenderable extends Renderable {
 
   public set focusedTextColor(value: ColorInput) {
     const newColor = parseColor(value ?? this._defaultOptions.focusedTextColor)
-    if (this._focusedTextColor !== newColor) {
+    if (!this._focusedTextColor.equals(newColor)) {
       this._focusedTextColor = newColor
       this.requestRender()
     }
@@ -434,7 +434,7 @@ export class SelectRenderable extends Renderable {
 
   public set selectedBackgroundColor(value: ColorInput) {
     const newColor = parseColor(value ?? this._defaultOptions.selectedBackgroundColor)
-    if (this._selectedBackgroundColor !== newColor) {
+    if (!this._selectedBackgroundColor.equals(newColor)) {
       this._selectedBackgroundColor = newColor
       this.requestRender()
     }
@@ -442,7 +442,7 @@ export class SelectRenderable extends Renderable {
 
   public set selectedTextColor(value: ColorInput) {
     const newColor = parseColor(value ?? this._defaultOptions.selectedTextColor)
-    if (this._selectedTextColor !== newColor) {
+    if (!this._selectedTextColor.equals(newColor)) {
       this._selectedTextColor = newColor
       this.requestRender()
     }
@@ -450,7 +450,7 @@ export class SelectRenderable extends Renderable {
 
   public set descriptionColor(value: ColorInput) {
     const newColor = parseColor(value ?? this._defaultOptions.descriptionColor)
-    if (this._descriptionColor !== newColor) {
+    if (!this._descriptionColor.equals(newColor)) {
       this._descriptionColor = newColor
       this.requestRender()
     }
@@ -458,7 +458,7 @@ export class SelectRenderable extends Renderable {
 
   public set selectedDescriptionColor(value: ColorInput) {
     const newColor = parseColor(value ?? this._defaultOptions.selectedDescriptionColor)
-    if (this._selectedDescriptionColor !== newColor) {
+    if (!this._selectedDescriptionColor.equals(newColor)) {
       this._selectedDescriptionColor = newColor
       this.requestRender()
     }

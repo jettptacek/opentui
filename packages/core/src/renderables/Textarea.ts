@@ -644,7 +644,7 @@ export class TextareaRenderable extends EditBufferRenderable {
 
   set placeholderColor(value: ColorInput) {
     const newColor = parseColor(value ?? TextareaRenderable.defaults.placeholderColor)
-    if (this._placeholderColor !== newColor) {
+    if (!this._placeholderColor.equals(newColor)) {
       this._placeholderColor = newColor
       this.applyPlaceholder(this._placeholder)
       this.requestRender()
@@ -657,7 +657,7 @@ export class TextareaRenderable extends EditBufferRenderable {
 
   override set backgroundColor(value: RGBA | string | undefined) {
     const newColor = parseColor(value ?? TextareaRenderable.defaults.backgroundColor)
-    if (this._unfocusedBackgroundColor !== newColor) {
+    if (!this._unfocusedBackgroundColor.equals(newColor)) {
       this._unfocusedBackgroundColor = newColor
       this.updateColors()
     }
@@ -669,7 +669,7 @@ export class TextareaRenderable extends EditBufferRenderable {
 
   override set textColor(value: RGBA | string | undefined) {
     const newColor = parseColor(value ?? TextareaRenderable.defaults.textColor)
-    if (this._unfocusedTextColor !== newColor) {
+    if (!this._unfocusedTextColor.equals(newColor)) {
       this._unfocusedTextColor = newColor
       this.updateColors()
     }
@@ -677,7 +677,7 @@ export class TextareaRenderable extends EditBufferRenderable {
 
   set focusedBackgroundColor(value: ColorInput) {
     const newColor = parseColor(value ?? TextareaRenderable.defaults.focusedBackgroundColor)
-    if (this._focusedBackgroundColor !== newColor) {
+    if (!this._focusedBackgroundColor.equals(newColor)) {
       this._focusedBackgroundColor = newColor
       this.updateColors()
     }
@@ -685,7 +685,7 @@ export class TextareaRenderable extends EditBufferRenderable {
 
   set focusedTextColor(value: ColorInput) {
     const newColor = parseColor(value ?? TextareaRenderable.defaults.focusedTextColor)
-    if (this._focusedTextColor !== newColor) {
+    if (!this._focusedTextColor.equals(newColor)) {
       this._focusedTextColor = newColor
       this.updateColors()
     }
