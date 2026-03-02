@@ -1105,6 +1105,84 @@ function getOpenTUILib(libPath?: string) {
       args: ["ptr", "ptr"],
       returns: "void",
     },
+
+    // ===== ChatClient =====
+    chatClientCreate: {
+      args: ["u16", "u16", "i32"],
+      returns: "ptr",
+    },
+    chatClientDestroy: {
+      args: ["ptr"],
+      returns: "void",
+    },
+    chatClientResize: {
+      args: ["ptr", "u16", "u16"],
+      returns: "void",
+    },
+    chatClientRender: {
+      args: ["ptr"],
+      returns: "bool",
+    },
+    chatClientSetScreen: {
+      args: ["ptr", "u8"],
+      returns: "void",
+    },
+    chatClientSetTheme: {
+      args: ["ptr", "ptr", "usize"],
+      returns: "void",
+    },
+    chatClientSetUser: {
+      args: ["ptr", "ptr", "usize", "f32", "f32", "f32", "f32", "u8"],
+      returns: "void",
+    },
+    chatClientAddMessage: {
+      args: ["ptr", "ptr", "usize", "f32", "f32", "f32", "f32", "u8", "ptr", "usize", "ptr", "usize", "i64"],
+      returns: "void",
+    },
+    chatClientSetChannel: {
+      args: ["ptr", "ptr", "usize"],
+      returns: "void",
+    },
+    chatClientAddChannel: {
+      args: ["ptr", "ptr", "usize", "bool"],
+      returns: "void",
+    },
+    chatClientAddUser: {
+      args: ["ptr", "ptr", "usize", "f32", "f32", "f32", "f32", "u8"],
+      returns: "void",
+    },
+    chatClientRemoveUser: {
+      args: ["ptr", "ptr", "usize"],
+      returns: "void",
+    },
+    chatClientScrollMessages: {
+      args: ["ptr", "i32"],
+      returns: "void",
+    },
+    chatClientSetShowTimestamps: {
+      args: ["ptr", "bool"],
+      returns: "void",
+    },
+    chatClientGetScreen: {
+      args: ["ptr"],
+      returns: "u8",
+    },
+    chatClientMarkDirty: {
+      args: ["ptr"],
+      returns: "void",
+    },
+    chatClientProcessKeyEvent: {
+      args: ["ptr", "u8", "u32", "u8"],
+      returns: "void",
+    },
+    chatClientPollEvent: {
+      args: ["ptr", "ptr", "u32"],
+      returns: "u32",
+    },
+    chatClientHasEvents: {
+      args: ["ptr"],
+      returns: "bool",
+    },
   })
 
   if (env.OTUI_DEBUG_FFI || env.OTUI_TRACE_FFI) {

@@ -17,6 +17,7 @@ const logger = @import("logger.zig");
 const event_bus = @import("event-bus.zig");
 const utils = @import("utils.zig");
 const native_span_feed = @import("native-span-feed.zig");
+const chat_client_mod = @import("chat/chat-client.zig");
 
 pub const OptimizedBuffer = buffer.OptimizedBuffer;
 pub const CliRenderer = renderer.CliRenderer;
@@ -1662,4 +1663,212 @@ export fn bufferDrawChar(
     const rgbaFg = utils.f32PtrToRGBA(fg);
     const rgbaBg = utils.f32PtrToRGBA(bg);
     bufferPtr.drawChar(char, x, y, rgbaFg, rgbaBg, attributes) catch {};
+}
+
+// ===== ChatClient Exports =====
+
+export fn chatClientCreate(width: u16, height: u16, output_fd: i32) ?*chat_client_mod.ChatClient {
+    const pool = gp.initGlobalPool(globalArena);
+    return chat_client_mod.ChatClient.create(globalAllocator, width, height, output_fd, pool) catch null;
+}
+
+export fn chatClientDestroy(client: *chat_client_mod.ChatClient) void {
+    client.destroy();
+}
+
+export fn chatClientResize(client: *chat_client_mod.ChatClient, width: u16, height: u16) void {
+    client.resize(width, height);
+}
+
+export fn chatClientRender(client: *chat_client_mod.ChatClient) bool {
+    return client.render();
+}
+
+export fn chatClientSetScreen(client: *chat_client_mod.ChatClient, screen: u8) void {
+    client.setScreen(@enumFromInt(screen));
+}
+
+export fn chatClientSetTheme(client: *chat_client_mod.ChatClient, idPtr: [*]const u8, idLen: usize) void {
+    const id = idPtr[0..idLen];
+    client.setTheme(id);
+}
+
+export fn chatClientSetUser(
+    client: *chat_client_mod.ChatClient,
+    namePtr: [*]const u8,
+    nameLen: usize,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+    role: u8,
+) void {
+    const color: buffer.RGBA = .{ r, g, b, a };
+    client.setUser(namePtr[0..nameLen], color, @enumFromInt(role));
+}
+
+export fn chatClientAddMessage(
+    client: *chat_client_mod.ChatClient,
+    fromNamePtr: [*]const u8,
+    fromNameLen: usize,
+    fromR: f32,
+    fromG: f32,
+    fromB: f32,
+    fromA: f32,
+    fromRole: u8,
+    contentPtr: [*]const u8,
+    contentLen: usize,
+    channelPtr: [*]const u8,
+    channelLen: usize,
+    timestamp: i64,
+) void {
+    const types = @import("chat/types.zig");
+    var msg = types.Message{};
+
+    const nlen = @min(fromNameLen, types.MAX_NAME_LEN);
+    @memcpy(msg.from_name[0..nlen], fromNamePtr[0..nlen]);
+    msg.from_name_len = @intCast(nlen);
+    msg.from_color = .{ fromR, fromG, fromB, fromA };
+    msg.from_role = @enumFromInt(fromRole);
+
+    const clen = @min(contentLen, types.MAX_CONTENT_LEN);
+    @memcpy(msg.content[0..clen], contentPtr[0..clen]);
+    msg.content_len = @intCast(clen);
+
+    const chlen = @min(channelLen, types.MAX_CHANNEL_NAME_LEN);
+    @memcpy(msg.channel[0..chlen], channelPtr[0..chlen]);
+    msg.channel_len = @intCast(chlen);
+
+    msg.timestamp = timestamp;
+
+    client.addMessage(msg) catch {};
+}
+
+export fn chatClientSetChannel(
+    client: *chat_client_mod.ChatClient,
+    namePtr: [*]const u8,
+    nameLen: usize,
+) void {
+    const types = @import("chat/types.zig");
+    const len = @min(nameLen, types.MAX_CHANNEL_NAME_LEN);
+    @memcpy(client.current_channel[0..len], namePtr[0..len]);
+    client.current_channel_len = @intCast(len);
+    client.dirty.channels = true;
+    client.dirty.compose = true;
+    client.render_requested = true;
+}
+
+export fn chatClientAddChannel(
+    client: *chat_client_mod.ChatClient,
+    namePtr: [*]const u8,
+    nameLen: usize,
+    isDm: bool,
+) void {
+    const types = @import("chat/types.zig");
+    var chan = types.Channel{};
+    const len = @min(nameLen, types.MAX_CHANNEL_NAME_LEN);
+    @memcpy(chan.name[0..len], namePtr[0..len]);
+    chan.name_len = @intCast(len);
+    chan.is_dm = isDm;
+    client.channels.append(globalAllocator, chan) catch {};
+    client.dirty.channels = true;
+    client.render_requested = true;
+}
+
+export fn chatClientAddUser(
+    client: *chat_client_mod.ChatClient,
+    namePtr: [*]const u8,
+    nameLen: usize,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+    role: u8,
+) void {
+    const types = @import("chat/types.zig");
+    var user = types.User{};
+    const len = @min(nameLen, types.MAX_NAME_LEN);
+    @memcpy(user.name[0..len], namePtr[0..len]);
+    user.name_len = @intCast(len);
+    user.color = .{ r, g, b, a };
+    user.role = @enumFromInt(role);
+    client.users.append(globalAllocator, user) catch {};
+    client.dirty.members = true;
+    client.render_requested = true;
+}
+
+export fn chatClientRemoveUser(
+    client: *chat_client_mod.ChatClient,
+    namePtr: [*]const u8,
+    nameLen: usize,
+) void {
+    const name = namePtr[0..nameLen];
+    const users = client.users.items;
+    var i: usize = 0;
+    while (i < users.len) {
+        if (std.mem.eql(u8, users[i].nameSlice(), name)) {
+            _ = client.users.orderedRemove(i);
+            client.dirty.members = true;
+            client.render_requested = true;
+            return;
+        }
+        i += 1;
+    }
+}
+
+export fn chatClientScrollMessages(client: *chat_client_mod.ChatClient, delta: i32) void {
+    client.msg_scroll_offset = @max(0, client.msg_scroll_offset + delta);
+    client.dirty.messages = true;
+    client.render_requested = true;
+}
+
+export fn chatClientSetShowTimestamps(client: *chat_client_mod.ChatClient, show: bool) void {
+    client.show_timestamps = show;
+    client.dirty.messages = true;
+    client.render_requested = true;
+}
+
+export fn chatClientGetScreen(client: *const chat_client_mod.ChatClient) u8 {
+    return @intFromEnum(client.screen);
+}
+
+export fn chatClientMarkDirty(client: *chat_client_mod.ChatClient) void {
+    client.dirty.markAll();
+    client.render_requested = true;
+}
+
+/// Process a parsed key event. TS parses raw escape sequences, then
+/// calls this with the structured key event.
+/// tag: 0 = char, 1 = special
+/// code: Unicode codepoint (if char) or SpecialKey value (if special)
+/// modifiers: bitfield — bit 0 = ctrl, bit 1 = shift, bit 2 = alt
+export fn chatClientProcessKeyEvent(
+    client: *chat_client_mod.ChatClient,
+    tag: u8,
+    code: u32,
+    modifiers: u8,
+) void {
+    const input_mod = @import("chat/input.zig");
+    const key = input_mod.KeyEvent{
+        .tag = tag,
+        .code = code,
+        .modifiers = @bitCast(modifiers),
+    };
+    client.processKeyEvent(key);
+}
+
+/// Poll the next outgoing event from the Zig chat client.
+/// Returns the number of bytes written to outPtr (0 if no events).
+/// TS should call this in a loop after processKeyEvent / render.
+export fn chatClientPollEvent(
+    client: *chat_client_mod.ChatClient,
+    outPtr: [*]u8,
+    maxLen: u32,
+) u32 {
+    return client.events.poll(outPtr, maxLen);
+}
+
+/// Check if the client has pending outgoing events.
+export fn chatClientHasEvents(client: *const chat_client_mod.ChatClient) bool {
+    return client.events.hasEvents();
 }
