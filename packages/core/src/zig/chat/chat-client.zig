@@ -22,6 +22,7 @@ const Screen = types.Screen;
 const User = types.User;
 const Channel = types.Channel;
 const Message = types.Message;
+const Modal = types.Modal;
 const theme_mod = @import("theme.zig");
 const Theme = theme_mod.Theme;
 const layout_mod = @import("layout.zig");
@@ -75,6 +76,34 @@ pub const ChatClient = struct {
     show_timestamps: bool,
     show_avatars: bool,
 
+    // Modal system
+    modal: Modal,
+
+    // Users/DM picker state
+    user_picker_idx: i32,
+    user_picker_selected: [types.MAX_USERS]bool, // multi-select flags indexed by user list position
+    user_picker_sel_count: u8,
+
+    // Add DM member state
+    add_member_idx: i32,
+
+    // Reaction picker state
+    reaction_idx: u8,
+    reaction_target_msg: i32, // message index to react to
+
+    // Settings state
+    settings_menu_idx: u8,
+    settings_color_idx: u8,
+    settings_theme_idx: u8,
+    settings_kb_idx: u8,
+    settings_kb_listening: bool,
+    settings_avatar_col: u8,
+    settings_avatar_draft: [3]u8, // 3-glyph pattern indices
+
+    // Settings name editor (shares register_edit_buffer when in name editing mode)
+    settings_name_edit_buffer: ?*EditBuffer,
+    settings_name_editor_view: ?*EditorView,
+
     // Dirty tracking — only re-render what changed
     dirty: DirtyFlags,
     render_requested: bool,
@@ -113,6 +142,14 @@ pub const ChatClient = struct {
         submit = 3,
     };
 
+    pub const SETTINGS_MENU_ITEMS = [_][]const u8{
+        "Name",
+        "Color",
+        "Theme",
+        "Keybindings",
+    };
+    pub const SETTINGS_MENU_COUNT: u8 = 4;
+
     pub fn create(allocator: Allocator, width: u16, height: u16, output_fd: i32, pool: *gp.GraphemePool) !*ChatClient {
         const self = try allocator.create(ChatClient);
         errdefer allocator.destroy(self);
@@ -143,6 +180,12 @@ pub const ChatClient = struct {
         const register_ev = try EditorView.init(allocator, register_eb, 30, 1);
         errdefer register_ev.deinit();
 
+        // Create settings name EditBuffer + EditorView
+        const settings_name_eb = try EditBuffer.init(allocator, pool, .wcwidth);
+        errdefer settings_name_eb.deinit();
+        const settings_name_ev = try EditorView.init(allocator, settings_name_eb, 25, 1);
+        errdefer settings_name_ev.deinit();
+
         self.* = .{
             .allocator = allocator,
             .renderer = rend,
@@ -164,6 +207,22 @@ pub const ChatClient = struct {
             .show_help = false,
             .show_timestamps = false,
             .show_avatars = false,
+            .modal = .none,
+            .user_picker_idx = 0,
+            .user_picker_selected = [_]bool{false} ** types.MAX_USERS,
+            .user_picker_sel_count = 0,
+            .add_member_idx = 0,
+            .reaction_idx = 0,
+            .reaction_target_msg = -1,
+            .settings_menu_idx = 0,
+            .settings_color_idx = 0,
+            .settings_theme_idx = 0,
+            .settings_kb_idx = 0,
+            .settings_kb_listening = false,
+            .settings_avatar_col = 0,
+            .settings_avatar_draft = .{ 0, 0, 0 },
+            .settings_name_edit_buffer = settings_name_eb,
+            .settings_name_editor_view = settings_name_ev,
             .dirty = .{}, // all dirty by default
             .render_requested = true,
             .theme = theme_mod.getDefaultTheme(),
@@ -213,6 +272,8 @@ pub const ChatClient = struct {
         if (self.compose_edit_buffer) |eb| eb.deinit();
         if (self.register_editor_view) |ev| ev.deinit();
         if (self.register_edit_buffer) |eb| eb.deinit();
+        if (self.settings_name_editor_view) |ev| ev.deinit();
+        if (self.settings_name_edit_buffer) |eb| eb.deinit();
         self.users.deinit(alloc);
         self.channels.deinit(alloc);
         self.messages.deinit(alloc);
@@ -274,6 +335,26 @@ pub const ChatClient = struct {
         }
         try self.messages.append(self.allocator, msg);
         self.dirty.messages = true;
+        self.render_requested = true;
+    }
+
+    // ---------------------------------------------------------------
+    // Modal helpers
+    // ---------------------------------------------------------------
+
+    pub fn hasModal(self: *const ChatClient) bool {
+        return self.modal != .none;
+    }
+
+    fn closeModal(self: *ChatClient) void {
+        self.modal = .none;
+        self.dirty.markAll();
+        self.render_requested = true;
+    }
+
+    fn openModal(self: *ChatClient, modal: Modal) void {
+        self.modal = modal;
+        self.dirty.markAll();
         self.render_requested = true;
     }
 
@@ -406,9 +487,9 @@ pub const ChatClient = struct {
     fn handleChatInput(self: *ChatClient, key: KeyEvent) void {
         const special = key.specialKey();
 
-        // --- Global keys (always processed) ---
+        // --- Global keys (always processed, even with modals) ---
 
-        // Ctrl+Q → immediate quit
+        // Ctrl+Q → immediate quit (always works)
         if (key.isChar() and key.hasCtrl()) {
             if (key.charValue()) |ch| {
                 if (ch == 'q') {
@@ -418,7 +499,15 @@ pub const ChatClient = struct {
             }
         }
 
-        // Escape → close help or quit
+        // --- Modal input takes priority ---
+        if (self.modal != .none) {
+            self.handleModalInput(key);
+            return;
+        }
+
+        // --- Non-modal global keys ---
+
+        // Escape → close help, deselect message, or quit
         if (special == .escape) {
             if (self.show_help) {
                 self.show_help = false;
@@ -426,7 +515,6 @@ pub const ChatClient = struct {
                 self.render_requested = true;
                 return;
             }
-            // If a message is selected, deselect it
             if (self.selected_msg_idx >= 0) {
                 self.selected_msg_idx = -1;
                 self.dirty.messages = true;
@@ -448,11 +536,44 @@ pub const ChatClient = struct {
         // Ctrl+T → toggle timestamps
         if (key.isChar() and key.hasCtrl()) {
             if (key.charValue()) |ch| {
-                if (ch == 't') {
-                    self.show_timestamps = !self.show_timestamps;
-                    self.dirty.messages = true;
-                    self.render_requested = true;
-                    return;
+                switch (ch) {
+                    't' => {
+                        self.show_timestamps = !self.show_timestamps;
+                        self.dirty.messages = true;
+                        self.render_requested = true;
+                        return;
+                    },
+                    'g' => {
+                        self.show_avatars = !self.show_avatars;
+                        self.dirty.messages = true;
+                        self.render_requested = true;
+                        return;
+                    },
+                    's' => {
+                        self.openSettingsMenu();
+                        return;
+                    },
+                    'u', 'n' => {
+                        self.openUserPicker();
+                        return;
+                    },
+                    'a' => {
+                        self.openAddMember();
+                        return;
+                    },
+                    'r' => {
+                        self.openReactionPicker();
+                        return;
+                    },
+                    'l' => {
+                        // Leave DM
+                        const chan = self.currentChannelSlice();
+                        if (chan.len > 3 and std.mem.startsWith(u8, chan, "dm-")) {
+                            _ = self.events.pushTagged(.leave_dm, "");
+                        }
+                        return;
+                    },
+                    else => {},
                 }
             }
         }
@@ -484,6 +605,415 @@ pub const ChatClient = struct {
             }
         }
     }
+
+    // ---------------------------------------------------------------
+    // Modal input dispatch
+    // ---------------------------------------------------------------
+
+    fn handleModalInput(self: *ChatClient, key: KeyEvent) void {
+        switch (self.modal) {
+            .none => {},
+            .help => self.handleHelpInput(key),
+            .users => self.handleUserPickerInput(key),
+            .add_member => self.handleAddMemberInput(key),
+            .reaction => self.handleReactionInput(key),
+            .settings_menu => self.handleSettingsMenuInput(key),
+            .settings_name => self.handleSettingsNameInput(key),
+            .settings_color => self.handleSettingsColorInput(key),
+            .settings_theme => self.handleSettingsThemeInput(key),
+            .settings_keybindings => self.handleSettingsKeybindingsInput(key),
+            .settings_avatar => self.handleSettingsAvatarInput(key),
+        }
+    }
+
+    fn handleHelpInput(self: *ChatClient, key: KeyEvent) void {
+        const special = key.specialKey();
+        // Escape or F1 closes help
+        if (special == .escape or special == .f1) {
+            self.closeModal();
+        }
+    }
+
+    fn handleUserPickerInput(self: *ChatClient, key: KeyEvent) void {
+        const special = key.specialKey();
+        const user_count = self.otherUserCount();
+
+        if (special == .escape) {
+            self.closeModal();
+            return;
+        }
+
+        if (user_count == 0) return;
+
+        if (special == .up or (key.isChar() and key.charValue() == 'k')) {
+            self.user_picker_idx = @mod(self.user_picker_idx - 1 + @as(i32, @intCast(user_count)), @as(i32, @intCast(user_count)));
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (special == .down or (key.isChar() and key.charValue() == 'j')) {
+            self.user_picker_idx = @mod(self.user_picker_idx + 1, @as(i32, @intCast(user_count)));
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (special == .space) {
+            // Toggle selection
+            const idx: usize = @intCast(self.user_picker_idx);
+            if (idx < types.MAX_USERS) {
+                self.user_picker_selected[idx] = !self.user_picker_selected[idx];
+                if (self.user_picker_selected[idx]) {
+                    self.user_picker_sel_count += 1;
+                } else {
+                    if (self.user_picker_sel_count > 0) self.user_picker_sel_count -= 1;
+                }
+                self.dirty.markAll();
+                self.render_requested = true;
+            }
+        } else if (special == .enter) {
+            // Create DM with selected users
+            if (self.user_picker_sel_count > 0) {
+                var names: [types.MAX_USERS][]const u8 = undefined;
+                var name_count: usize = 0;
+                const others = self.getOtherUsers();
+                for (others, 0..) |*u, i| {
+                    if (i < types.MAX_USERS and self.user_picker_selected[i]) {
+                        names[name_count] = u.nameSlice();
+                        name_count += 1;
+                    }
+                }
+                if (name_count > 0) {
+                    _ = self.events.pushCreateDm(names[0..name_count]);
+                }
+            }
+            self.closeModal();
+        }
+    }
+
+    fn handleAddMemberInput(self: *ChatClient, key: KeyEvent) void {
+        const special = key.specialKey();
+        const user_count = self.otherUserCount();
+
+        if (special == .escape) {
+            self.closeModal();
+            return;
+        }
+
+        if (user_count == 0) return;
+
+        if (special == .up or (key.isChar() and key.charValue() == 'k')) {
+            self.add_member_idx = @mod(self.add_member_idx - 1 + @as(i32, @intCast(user_count)), @as(i32, @intCast(user_count)));
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (special == .down or (key.isChar() and key.charValue() == 'j')) {
+            self.add_member_idx = @mod(self.add_member_idx + 1, @as(i32, @intCast(user_count)));
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (special == .enter) {
+            const others = self.getOtherUsers();
+            const idx: usize = @intCast(self.add_member_idx);
+            if (idx < others.len) {
+                const name = others[idx].nameSlice();
+                _ = self.events.pushTagged(.add_dm_member, name);
+            }
+            self.closeModal();
+        }
+    }
+
+    fn handleReactionInput(self: *ChatClient, key: KeyEvent) void {
+        const special = key.specialKey();
+
+        if (special == .escape) {
+            self.closeModal();
+            return;
+        }
+
+        if (special == .left or (key.isChar() and key.charValue() == 'h')) {
+            if (self.reaction_idx > 0) self.reaction_idx -= 1 else self.reaction_idx = 7;
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (special == .right or (key.isChar() and key.charValue() == 'l')) {
+            if (self.reaction_idx < 7) self.reaction_idx += 1 else self.reaction_idx = 0;
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (special == .up) {
+            if (self.reaction_idx >= 4) self.reaction_idx -= 4;
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (special == .down) {
+            if (self.reaction_idx + 4 < 8) self.reaction_idx += 4;
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (special == .enter) {
+            self.submitReaction();
+        } else if (key.isChar() and !key.hasCtrl()) {
+            // Number keys 1-8 for quick selection
+            if (key.charValue()) |ch| {
+                if (ch >= '1' and ch <= '8') {
+                    self.reaction_idx = @intCast(ch - '1');
+                    self.submitReaction();
+                }
+            }
+        }
+    }
+
+    fn submitReaction(self: *ChatClient) void {
+        if (self.reaction_target_msg < 0) {
+            self.closeModal();
+            return;
+        }
+        const emoji = types.REACTION_EMOJIS[self.reaction_idx];
+        // Build payload: msg_id not available as string yet, use index as string
+        // For now just send the emoji name — TS side can figure out the msg
+        _ = self.events.pushTagged(.toggle_reaction, emoji);
+        self.closeModal();
+    }
+
+    fn handleSettingsMenuInput(self: *ChatClient, key: KeyEvent) void {
+        const special = key.specialKey();
+
+        if (special == .escape) {
+            self.closeModal();
+            return;
+        }
+
+        if (special == .up or (key.isChar() and key.charValue() == 'k')) {
+            if (self.settings_menu_idx > 0) {
+                self.settings_menu_idx -= 1;
+            } else {
+                self.settings_menu_idx = SETTINGS_MENU_COUNT - 1;
+            }
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (special == .down or (key.isChar() and key.charValue() == 'j')) {
+            if (self.settings_menu_idx < SETTINGS_MENU_COUNT - 1) {
+                self.settings_menu_idx += 1;
+            } else {
+                self.settings_menu_idx = 0;
+            }
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (special == .enter) {
+            self.openSettingsSubEditor();
+        }
+    }
+
+    fn openSettingsSubEditor(self: *ChatClient) void {
+        switch (self.settings_menu_idx) {
+            0 => {
+                // Name editor — populate with current name
+                if (self.settings_name_edit_buffer) |eb| {
+                    eb.clear() catch {};
+                    if (self.me) |me| {
+                        eb.insertText(me.nameSlice()) catch {};
+                    }
+                }
+                self.openModal(.settings_name);
+            },
+            1 => {
+                // Color editor — set index from current color
+                self.settings_color_idx = 0;
+                if (self.me) |me| {
+                    for (panel_render.REGISTER_COLORS, 0..) |c, i| {
+                        if (colorsEqual(c, me.color)) {
+                            self.settings_color_idx = @intCast(i);
+                            break;
+                        }
+                    }
+                }
+                self.openModal(.settings_color);
+            },
+            2 => {
+                // Theme editor — set index from current theme
+                self.settings_theme_idx = 0;
+                for (&theme_mod.themes, 0..) |t, i| {
+                    if (std.mem.eql(u8, t.id, self.theme.id)) {
+                        self.settings_theme_idx = @intCast(i);
+                        break;
+                    }
+                }
+                self.openModal(.settings_theme);
+            },
+            3 => {
+                // Keybindings editor
+                self.settings_kb_idx = 0;
+                self.settings_kb_listening = false;
+                self.openModal(.settings_keybindings);
+            },
+            else => {},
+        }
+    }
+
+    fn handleSettingsNameInput(self: *ChatClient, key: KeyEvent) void {
+        const special = key.specialKey();
+
+        if (special == .escape) {
+            self.openModal(.settings_menu); // back to menu
+            return;
+        }
+
+        if (special == .enter) {
+            // Save name
+            if (self.settings_name_edit_buffer) |eb| {
+                const name_len = eb.getText(&_get_text_buf);
+                if (name_len > 0 and name_len <= types.MAX_NAME_LEN) {
+                    _ = self.events.pushUpdateProfile("name", _get_text_buf[0..name_len]);
+                }
+            }
+            self.openModal(.settings_menu); // back to menu
+            return;
+        }
+
+        // Delegate to editor for text input
+        if (self.settings_name_edit_buffer) |eb| {
+            self.handleEditorInput(eb, key);
+            self.dirty.markAll();
+            self.render_requested = true;
+        }
+    }
+
+    fn handleSettingsColorInput(self: *ChatClient, key: KeyEvent) void {
+        const special = key.specialKey();
+
+        if (special == .escape) {
+            self.openModal(.settings_menu);
+            return;
+        }
+
+        if (special == .left or (key.isChar() and key.charValue() == 'h')) {
+            if (self.settings_color_idx > 0) self.settings_color_idx -= 1 else self.settings_color_idx = 7;
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (special == .right or (key.isChar() and key.charValue() == 'l')) {
+            if (self.settings_color_idx < 7) self.settings_color_idx += 1 else self.settings_color_idx = 0;
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (special == .enter) {
+            // Save color — convert RGBA to hex string
+            const color = panel_render.REGISTER_COLORS[self.settings_color_idx];
+            var hex_buf: [7]u8 = undefined;
+            _ = std.fmt.bufPrint(&hex_buf, "#{x:0>2}{x:0>2}{x:0>2}", .{
+                @as(u8, @intFromFloat(color[0] * 255.0)),
+                @as(u8, @intFromFloat(color[1] * 255.0)),
+                @as(u8, @intFromFloat(color[2] * 255.0)),
+            }) catch {};
+            _ = self.events.pushUpdateProfile("color", &hex_buf);
+            self.openModal(.settings_menu);
+        }
+    }
+
+    fn handleSettingsThemeInput(self: *ChatClient, key: KeyEvent) void {
+        const special = key.specialKey();
+
+        if (special == .escape) {
+            self.openModal(.settings_menu);
+            return;
+        }
+
+        if (special == .up or (key.isChar() and key.charValue() == 'k')) {
+            if (self.settings_theme_idx > 0) self.settings_theme_idx -= 1 else self.settings_theme_idx = @intCast(theme_mod.themes.len - 1);
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (special == .down or (key.isChar() and key.charValue() == 'j')) {
+            if (self.settings_theme_idx < theme_mod.themes.len - 1) self.settings_theme_idx += 1 else self.settings_theme_idx = 0;
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (special == .enter) {
+            const theme_entry = &theme_mod.themes[self.settings_theme_idx];
+            _ = self.events.pushUpdateProfile("theme", theme_entry.id);
+            self.openModal(.settings_menu);
+        }
+    }
+
+    fn handleSettingsKeybindingsInput(self: *ChatClient, key: KeyEvent) void {
+        const special = key.specialKey();
+
+        // Keybindings view is read-only for now — just shows current bindings
+        // TODO: implement rebinding (capture mode)
+        if (special == .escape) {
+            self.openModal(.settings_menu);
+            return;
+        }
+
+        if (special == .up or (key.isChar() and key.charValue() == 'k')) {
+            if (self.settings_kb_idx > 0) self.settings_kb_idx -= 1;
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (special == .down or (key.isChar() and key.charValue() == 'j')) {
+            self.settings_kb_idx += 1;
+            self.dirty.markAll();
+            self.render_requested = true;
+        }
+    }
+
+    fn handleSettingsAvatarInput(self: *ChatClient, key: KeyEvent) void {
+        const special = key.specialKey();
+
+        if (special == .escape) {
+            self.openModal(.settings_menu);
+            return;
+        }
+
+        // Left/Right to move cursor between glyph columns
+        if (special == .left or (key.isChar() and key.charValue() == 'h')) {
+            if (self.settings_avatar_col > 0) self.settings_avatar_col -= 1 else self.settings_avatar_col = 2;
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (special == .right or (key.isChar() and key.charValue() == 'l')) {
+            if (self.settings_avatar_col < 2) self.settings_avatar_col += 1 else self.settings_avatar_col = 0;
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (special == .up or (key.isChar() and key.charValue() == 'k')) {
+            // Cycle glyph at current column
+            if (self.settings_avatar_draft[self.settings_avatar_col] > 0) {
+                self.settings_avatar_draft[self.settings_avatar_col] -= 1;
+            }
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (special == .down or (key.isChar() and key.charValue() == 'j')) {
+            self.settings_avatar_draft[self.settings_avatar_col] +|= 1;
+            self.dirty.markAll();
+            self.render_requested = true;
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Modal openers
+    // ---------------------------------------------------------------
+
+    fn openSettingsMenu(self: *ChatClient) void {
+        self.settings_menu_idx = 0;
+        self.openModal(.settings_menu);
+    }
+
+    fn openUserPicker(self: *ChatClient) void {
+        self.user_picker_idx = 0;
+        self.user_picker_sel_count = 0;
+        self.user_picker_selected = [_]bool{false} ** types.MAX_USERS;
+        self.openModal(.users);
+    }
+
+    fn openAddMember(self: *ChatClient) void {
+        // Only open if in a DM channel
+        const chan = self.currentChannelSlice();
+        if (chan.len > 3 and std.mem.startsWith(u8, chan, "dm-")) {
+            self.add_member_idx = 0;
+            self.openModal(.add_member);
+        }
+    }
+
+    fn openReactionPicker(self: *ChatClient) void {
+        self.reaction_idx = 0;
+        // Target the selected message or last message
+        if (self.selected_msg_idx >= 0) {
+            self.reaction_target_msg = self.selected_msg_idx;
+        } else if (self.messages.items.len > 0) {
+            self.reaction_target_msg = @intCast(self.messages.items.len - 1);
+        } else {
+            return; // no messages to react to
+        }
+        self.openModal(.reaction);
+    }
+
+    // ---------------------------------------------------------------
+    // Panel-specific input
+    // ---------------------------------------------------------------
 
     fn handleComposeInput(self: *ChatClient, key: KeyEvent) void {
         const special = key.specialKey();
@@ -736,6 +1266,28 @@ pub const ChatClient = struct {
     }
 
     // ---------------------------------------------------------------
+    // User helpers
+    // ---------------------------------------------------------------
+
+    fn otherUserCount(self: *const ChatClient) usize {
+        var count: usize = 0;
+        for (self.users.items) |*u| {
+            if (self.me) |me| {
+                if (std.mem.eql(u8, u.nameSlice(), me.nameSlice())) continue;
+            }
+            count += 1;
+        }
+        return count;
+    }
+
+    pub fn getOtherUsers(self: *const ChatClient) []const User {
+        // Returns a view of users excluding self — but since we can't
+        // easily return a filtered slice, callers should iterate and skip self.
+        // This returns the full list; callers must check.
+        return self.users.items;
+    }
+
+    // ---------------------------------------------------------------
     // Rendering
     // ---------------------------------------------------------------
 
@@ -776,6 +1328,13 @@ pub const ChatClient = struct {
                     if (!p.visible) continue;
                     panel_render.renderPanel(self, p, buf);
                 }
+                // Render modal overlay on top
+                if (self.modal != .none) {
+                    panel_render.renderModal(self, buf);
+                } else if (self.show_help) {
+                    // Legacy help toggle (F1 without modal system)
+                    panel_render.renderModal(self, buf);
+                }
             },
         }
 
@@ -814,5 +1373,11 @@ pub const ChatClient = struct {
 
     pub fn currentChannelSlice(self: *const ChatClient) []const u8 {
         return self.current_channel[0..self.current_channel_len];
+    }
+
+    fn colorsEqual(a: RGBA, b: RGBA) bool {
+        return @abs(a[0] - b[0]) < 0.01 and
+            @abs(a[1] - b[1]) < 0.01 and
+            @abs(a[2] - b[2]) < 0.01;
     }
 };

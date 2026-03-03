@@ -1,6 +1,6 @@
 // chat/types.zig — Shared types for the Zig chat renderer
-const std = @import("std")
-;const Allocator = std.mem.Allocator;
+const std = @import("std");
+const Allocator = std.mem.Allocator;
 const buffer = @import("../buffer.zig");
 pub const RGBA = buffer.RGBA;
 
@@ -128,6 +128,45 @@ pub const Panel = struct {
         if (self.height < 2) return 0;
         return self.height - 2;
     }
+};
+
+/// Active modal overlay (only one at a time)
+pub const Modal = enum(u8) {
+    none = 0,
+    help = 1,
+    users = 2, // Users/DM picker (Ctrl+U / Ctrl+N)
+    add_member = 3, // Add member to DM (Ctrl+A)
+    reaction = 4, // Reaction picker (Ctrl+R)
+    settings_menu = 5, // Settings top-level menu (Ctrl+S)
+    settings_name = 6,
+    settings_color = 7,
+    settings_avatar = 8,
+    settings_theme = 9,
+    settings_keybindings = 10,
+};
+
+/// Reaction emoji identifiers
+pub const REACTION_EMOJIS = [8][]const u8{
+    "+1",
+    "heart",
+    "joy",
+    "open_mouth",
+    "cry",
+    "tada",
+    "fire",
+    "eyes",
+};
+
+/// Reaction emoji display characters (UTF-8)
+pub const REACTION_DISPLAY = [8][]const u8{
+    "\xf0\x9f\x91\x8d", // 👍
+    "\xe2\x9d\xa4\xef\xb8\x8f", // ❤️
+    "\xf0\x9f\x98\x82", // 😂
+    "\xf0\x9f\x98\xae", // 😮
+    "\xf0\x9f\x98\xa2", // 😢
+    "\xf0\x9f\x8e\x89", // 🎉
+    "\xf0\x9f\x94\xa5", // 🔥
+    "\xf0\x9f\x91\x80", // 👀
 };
 
 pub const DirtyFlags = packed struct {

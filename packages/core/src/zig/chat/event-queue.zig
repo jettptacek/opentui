@@ -20,7 +20,9 @@ pub const EventTag = enum(u8) {
     leave_dm = 7, // no payload (TS infers channel)
     toggle_reaction = 8, // payload: msg_id + emoji
     focus_changed = 9, // payload: panel_kind(u8)
-    // Future: update_profile, create_dm, etc.
+    update_profile = 10, // payload: field_len(u8) + field + value
+    create_dm = 11, // payload: user_count(u8) + (name_len(u8) + name)*N
+    add_dm_member = 12, // payload: name_len(u8) + name
 };
 
 pub const EventQueue = struct {
@@ -101,6 +103,44 @@ pub const EventQueue = struct {
         }
         @memcpy(buf[off .. off + theme_id.len], theme_id);
         off += theme_id.len;
+        self.lengths[self.tail] = @intCast(off);
+        self.tail = (self.tail + 1) % MAX_EVENTS;
+        self.count += 1;
+        return true;
+    }
+
+    /// Push an update_profile event: tag(1) + field_len(1) + field + value
+    pub fn pushUpdateProfile(self: *EventQueue, field: []const u8, value: []const u8) bool {
+        if (self.count >= MAX_EVENTS) return false;
+        const total = 1 + 1 + field.len + value.len;
+        if (total > MAX_EVENT_SIZE) return false;
+        var buf = &self.events[self.tail];
+        buf[0] = @intFromEnum(EventTag.update_profile);
+        buf[1] = @intCast(field.len);
+        @memcpy(buf[2 .. 2 + field.len], field);
+        @memcpy(buf[2 + field.len .. 2 + field.len + value.len], value);
+        self.lengths[self.tail] = @intCast(total);
+        self.tail = (self.tail + 1) % MAX_EVENTS;
+        self.count += 1;
+        return true;
+    }
+
+    /// Push a create_dm event: tag(1) + user_count(u8) + (name_len(u8) + name)*N
+    pub fn pushCreateDm(self: *EventQueue, names: []const []const u8) bool {
+        if (self.count >= MAX_EVENTS) return false;
+        var total: usize = 2; // tag + count
+        for (names) |n| total += 1 + n.len;
+        if (total > MAX_EVENT_SIZE) return false;
+        var buf = &self.events[self.tail];
+        buf[0] = @intFromEnum(EventTag.create_dm);
+        buf[1] = @intCast(names.len);
+        var off: usize = 2;
+        for (names) |n| {
+            buf[off] = @intCast(n.len);
+            off += 1;
+            @memcpy(buf[off .. off + n.len], n);
+            off += n.len;
+        }
         self.lengths[self.tail] = @intCast(off);
         self.tail = (self.tail + 1) % MAX_EVENTS;
         self.count += 1;

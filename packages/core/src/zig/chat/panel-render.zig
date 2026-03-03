@@ -248,10 +248,11 @@ fn renderCompose(client: *const ChatClient, panel: *const Panel, buf: *Optimized
 
         if (focused) {
             // Show terminal cursor at the editor's visual cursor position
+            // setCursorPosition expects 1-based coordinates (ANSI convention)
             const vc = ev.getVisualCursor();
             client.renderer.terminal.setCursorPosition(
-                @as(u32, @intCast(prompt_x)) + vc.visual_col,
-                @as(u32, @intCast(iy)) + vc.visual_row,
+                @as(u32, @intCast(prompt_x)) + vc.visual_col + 1,
+                @as(u32, @intCast(iy)) + vc.visual_row + 1,
                 true,
             );
         }
@@ -441,10 +442,11 @@ pub fn renderRegisterScreen(client: *const ChatClient, buf: *OptimizedBuffer) vo
         buf.drawEditorView(ev, @intCast(ix + 10), @intCast(iy + 2)) catch {};
 
         if (reg_focus == .name) {
+            // setCursorPosition expects 1-based coordinates (ANSI convention)
             const vc = ev.getVisualCursor();
             client.renderer.terminal.setCursorPosition(
-                ix + 10 + vc.visual_col,
-                iy + 2 + vc.visual_row,
+                ix + 10 + vc.visual_col + 1,
+                iy + 2 + vc.visual_row + 1,
                 true,
             );
         }
@@ -492,4 +494,452 @@ pub fn renderRegisterScreen(client: *const ChatClient, buf: *OptimizedBuffer) vo
 
     // Footer hints
     buf.drawText("Tab to navigate \xc2\xb7 Enter to submit", ix, @intCast(box_y + box_h - 2), t.text_dim, t.background, 0) catch {};
+}
+
+// ===================================================================
+// Modal overlays
+// ===================================================================
+
+const Modal = types.Modal;
+
+pub fn renderModal(client: *const ChatClient, buf: *OptimizedBuffer) void {
+    // If show_help is set but modal is .none, render help
+    const modal = if (client.modal == .none and client.show_help) Modal.help else client.modal;
+    switch (modal) {
+        .none => {},
+        .help => renderHelpModal(client, buf),
+        .users => renderUserPickerModal(client, buf),
+        .add_member => renderAddMemberModal(client, buf),
+        .reaction => renderReactionModal(client, buf),
+        .settings_menu => renderSettingsMenuModal(client, buf),
+        .settings_name => renderSettingsNameModal(client, buf),
+        .settings_color => renderSettingsColorModal(client, buf),
+        .settings_theme => renderSettingsThemeModal(client, buf),
+        .settings_keybindings => renderSettingsKeybindingsModal(client, buf),
+        .settings_avatar => renderSettingsAvatarModal(client, buf),
+    }
+}
+
+fn renderHelpModal(client: *const ChatClient, buf: *OptimizedBuffer) void {
+    const t = client.theme;
+    const w: u16 = @min(50, client.width -| 4);
+    const h: u16 = @min(22, client.height -| 4);
+    const x = @max(2, (client.width -| w) / 2);
+    const y = @max(2, (client.height -| h) / 2);
+
+    drawBorderBox(buf, x, y, w, h, t.accent, t.background, "Keyboard Shortcuts", t.accent);
+
+    const ix: u32 = @intCast(x + 2);
+    var iy: u32 = @intCast(y + 2);
+
+    const bindings = [_][2][]const u8{
+        .{ "Tab / Shift+Tab", "Cycle focus" },
+        .{ "Enter", "Send message / select" },
+        .{ "Up/Down", "Navigate lists" },
+        .{ "Ctrl+Left/Right", "Prev/next channel" },
+        .{ "F1", "Toggle this help" },
+        .{ "Ctrl+S", "Settings" },
+        .{ "Ctrl+T", "Toggle timestamps" },
+        .{ "Ctrl+G", "Toggle avatars" },
+        .{ "Ctrl+U", "User picker / DM" },
+        .{ "Ctrl+N", "New DM" },
+        .{ "Ctrl+A", "Add DM member" },
+        .{ "Ctrl+R", "React to message" },
+        .{ "Ctrl+L", "Leave DM" },
+        .{ "Ctrl+Q", "Quit" },
+        .{ "Escape", "Close / back" },
+    };
+
+    const max_rows: u32 = @intCast(h -| 4);
+    for (bindings) |b| {
+        if (iy - @as(u32, @intCast(y + 2)) >= max_rows) break;
+        buf.drawText(b[0], ix, iy, t.primary, t.background, 1) catch {};
+        const desc_x = ix + 20;
+        buf.drawText(b[1], desc_x, iy, t.text, t.background, 0) catch {};
+        iy += 1;
+    }
+
+    // Footer
+    buf.drawText("Press F1 or Esc to close", ix, @intCast(y + h - 2), t.text_dim, t.background, 0) catch {};
+}
+
+fn renderUserPickerModal(client: *const ChatClient, buf: *OptimizedBuffer) void {
+    const t = client.theme;
+    const w: u16 = @min(40, client.width -| 4);
+    const h: u16 = @min(20, client.height -| 4);
+    const x = @max(2, (client.width -| w) / 2);
+    const y = @max(2, (client.height -| h) / 2);
+
+    drawBorderBox(buf, x, y, w, h, t.accent, t.background, "Online Users", t.accent);
+
+    const ix: u32 = @intCast(x + 2);
+    var iy: u32 = @intCast(y + 2);
+    const max_rows: u32 = @intCast(h -| 4);
+
+    // Show current user first
+    if (client.me) |me| {
+        const name = me.nameSlice();
+        buf.drawText(name, ix + 4, iy, me.color, t.background, 0) catch {};
+        buf.drawText(" (you)", ix + 4 + @as(u32, @intCast(name.len)), iy, t.text_muted, t.background, 0) catch {};
+        iy += 1;
+    }
+
+    // Other users with selection
+    var other_idx: usize = 0;
+    for (client.users.items) |*u| {
+        if (iy - @as(u32, @intCast(y + 2)) >= max_rows) break;
+        if (client.me) |me| {
+            if (std.mem.eql(u8, u.nameSlice(), me.nameSlice())) continue;
+        }
+
+        const is_highlighted = @as(i32, @intCast(other_idx)) == client.user_picker_idx;
+        const is_selected = other_idx < types.MAX_USERS and client.user_picker_selected[other_idx];
+
+        // Checkbox
+        const check = if (is_selected) "[x] " else "[ ] ";
+        const fg = if (is_highlighted) t.background else u.color;
+        const bg = if (is_highlighted) t.primary else t.background;
+
+        // Fill line background for highlight
+        if (is_highlighted) {
+            buf.fillRect(ix, iy, @intCast(w -| 4), 1, bg) catch {};
+        }
+
+        buf.drawText(check, ix, iy, fg, bg, 0) catch {};
+        buf.drawText(u.nameSlice(), ix + 4, iy, fg, bg, 0) catch {};
+
+        // Role badge
+        if (u.role == .admin) {
+            buf.drawText(" [A]", ix + 4 + @as(u32, @intCast(u.name_len)), iy, ADMIN_BADGE_COLOR, bg, 0) catch {};
+        } else if (u.role == .moderator) {
+            buf.drawText(" [M]", ix + 4 + @as(u32, @intCast(u.name_len)), iy, MOD_BADGE_COLOR, bg, 0) catch {};
+        }
+
+        iy += 1;
+        other_idx += 1;
+    }
+
+    if (other_idx == 0) {
+        buf.drawText("No other users online", ix, iy, t.text_dim, t.background, 0) catch {};
+    }
+
+    // Footer
+    buf.drawText("Space toggle, Enter DM, Esc close", ix, @intCast(y + h - 2), t.text_dim, t.background, 0) catch {};
+}
+
+fn renderAddMemberModal(client: *const ChatClient, buf: *OptimizedBuffer) void {
+    const t = client.theme;
+    const w: u16 = @min(36, client.width -| 4);
+    const h: u16 = @min(16, client.height -| 4);
+    const x = @max(2, (client.width -| w) / 2);
+    const y = @max(2, (client.height -| h) / 2);
+
+    drawBorderBox(buf, x, y, w, h, t.accent, t.background, "Add Member to DM", t.accent);
+
+    const ix: u32 = @intCast(x + 2);
+    var iy: u32 = @intCast(y + 2);
+    const max_rows: u32 = @intCast(h -| 4);
+
+    var other_idx: usize = 0;
+    for (client.users.items) |*u| {
+        if (iy - @as(u32, @intCast(y + 2)) >= max_rows) break;
+        if (client.me) |me| {
+            if (std.mem.eql(u8, u.nameSlice(), me.nameSlice())) continue;
+        }
+
+        const is_highlighted = @as(i32, @intCast(other_idx)) == client.add_member_idx;
+        const fg = if (is_highlighted) t.background else u.color;
+        const bg = if (is_highlighted) t.primary else t.background;
+
+        if (is_highlighted) {
+            buf.fillRect(ix, iy, @intCast(w -| 4), 1, bg) catch {};
+        }
+        buf.drawText(u.nameSlice(), ix, iy, fg, bg, 0) catch {};
+
+        iy += 1;
+        other_idx += 1;
+    }
+
+    buf.drawText("Enter add, Esc cancel", ix, @intCast(y + h - 2), t.text_dim, t.background, 0) catch {};
+}
+
+fn renderReactionModal(client: *const ChatClient, buf: *OptimizedBuffer) void {
+    const t = client.theme;
+    const w: u16 = @min(38, client.width -| 4);
+    const h: u16 = 7;
+    const x = @max(2, (client.width -| w) / 2);
+    const y = @max(2, (client.height -| h) / 2);
+
+    drawBorderBox(buf, x, y, w, h, t.warning, t.background, "React to Message", t.warning);
+
+    const ix: u32 = @intCast(x + 2);
+    const iy: u32 = @intCast(y + 2);
+
+    // Draw 8 emoji slots in a 4x2 grid
+    for (0..8) |i| {
+        const col: u32 = @intCast(i % 4);
+        const row: u32 = @intCast(i / 4);
+        const cx = ix + col * 8;
+        const cy = iy + row;
+        const is_selected = i == client.reaction_idx;
+
+        const label = types.REACTION_EMOJIS[i];
+        const fg = if (is_selected) t.background else t.text;
+        const bg2 = if (is_selected) t.warning else t.background;
+
+        if (is_selected) {
+            buf.fillRect(cx, cy, @intCast(@min(label.len + 2, 8)), 1, bg2) catch {};
+        }
+        // Draw emoji name as label (since terminal emoji support varies)
+        const display = @min(label.len, 6);
+        buf.drawText(label[0..display], cx + 1, cy, fg, bg2, 0) catch {};
+    }
+
+    // Footer
+    buf.drawText("Arrows, 1-8 quick, Enter, Esc", ix, @intCast(y + h - 2), t.text_dim, t.background, 0) catch {};
+}
+
+fn renderSettingsMenuModal(client: *const ChatClient, buf: *OptimizedBuffer) void {
+    const t = client.theme;
+    const w: u16 = @min(36, client.width -| 4);
+    const h: u16 = @min(12, client.height -| 4);
+    const x = @max(2, (client.width -| w) / 2);
+    const y = @max(2, (client.height -| h) / 2);
+
+    drawBorderBox(buf, x, y, w, h, t.accent, t.background, "Settings", t.accent);
+
+    const ix: u32 = @intCast(x + 2);
+    var iy: u32 = @intCast(y + 2);
+
+    for (ChatClient.SETTINGS_MENU_ITEMS, 0..) |item, i| {
+        const is_selected = i == client.settings_menu_idx;
+        const fg = if (is_selected) t.background else t.text;
+        const bg = if (is_selected) t.primary else t.background;
+
+        if (is_selected) {
+            buf.fillRect(ix, iy, @intCast(w -| 4), 1, bg) catch {};
+            buf.drawText("> ", ix, iy, fg, bg, 1) catch {};
+            buf.drawText(item, ix + 2, iy, fg, bg, 1) catch {};
+        } else {
+            buf.drawText("  ", ix, iy, fg, bg, 0) catch {};
+            buf.drawText(item, ix + 2, iy, fg, bg, 0) catch {};
+        }
+
+        // Show current value
+        const val_x = ix + 18;
+        switch (i) {
+            0 => {
+                // Name
+                if (client.me) |me| {
+                    buf.drawText(me.nameSlice(), val_x, iy, t.text_muted, bg, 0) catch {};
+                }
+            },
+            1 => {
+                // Color — show swatch
+                if (client.me) |me| {
+                    buf.fillRect(val_x, iy, 2, 1, me.color) catch {};
+                }
+            },
+            2 => {
+                // Theme
+                buf.drawText(client.theme.name, val_x, iy, t.text_muted, bg, 0) catch {};
+            },
+            else => {},
+        }
+
+        iy += 1;
+    }
+
+    buf.drawText("Enter open, Esc close", ix, @intCast(y + h - 2), t.text_dim, t.background, 0) catch {};
+}
+
+fn renderSettingsNameModal(client: *const ChatClient, buf: *OptimizedBuffer) void {
+    const t = client.theme;
+    const w: u16 = @min(40, client.width -| 4);
+    const h: u16 = 7;
+    const x = @max(2, (client.width -| w) / 2);
+    const y = @max(2, (client.height -| h) / 2);
+
+    drawBorderBox(buf, x, y, w, h, t.primary, t.background, "Change Name", t.primary);
+
+    const ix: u32 = @intCast(x + 2);
+    const iy: u32 = @intCast(y + 2);
+
+    buf.drawText("Name: ", ix, iy, t.text_muted, t.background, 0) catch {};
+
+    if (client.settings_name_editor_view) |ev| {
+        ev.setViewportSize(25, 1);
+        const editor_x: i32 = @intCast(ix + 6);
+        buf.drawEditorView(ev, editor_x, @intCast(iy)) catch {};
+
+        // Show cursor (1-based)
+        const vc = ev.getVisualCursor();
+        client.renderer.terminal.setCursorPosition(
+            @as(u32, @intCast(editor_x)) + vc.visual_col + 1,
+            iy + vc.visual_row + 1,
+            true,
+        );
+    }
+
+    buf.drawText("Enter save, Esc back", ix, @intCast(y + h - 2), t.text_dim, t.background, 0) catch {};
+}
+
+fn renderSettingsColorModal(client: *const ChatClient, buf: *OptimizedBuffer) void {
+    const t = client.theme;
+    const w: u16 = @min(44, client.width -| 4);
+    const h: u16 = 8;
+    const x = @max(2, (client.width -| w) / 2);
+    const y = @max(2, (client.height -| h) / 2);
+
+    drawBorderBox(buf, x, y, w, h, t.primary, t.background, "Change Color", t.primary);
+
+    const ix: u32 = @intCast(x + 2);
+    const iy: u32 = @intCast(y + 2);
+
+    // Draw 8 color swatches
+    for (REGISTER_COLORS, 0..) |color, ci| {
+        const cx: u32 = ix + @as(u32, @intCast(ci)) * 4;
+        const is_selected = ci == client.settings_color_idx;
+        if (is_selected) {
+            buf.drawText("[", cx, iy, t.primary, t.background, 0) catch {};
+            buf.drawText("]", cx + 3, iy, t.primary, t.background, 0) catch {};
+        }
+        buf.fillRect(cx + 1, iy, 2, 1, color) catch {};
+    }
+
+    // Preview
+    if (client.me) |me| {
+        const preview_color = REGISTER_COLORS[client.settings_color_idx];
+        buf.drawText(me.nameSlice(), ix, iy + 2, preview_color, t.background, 1) catch {};
+    }
+
+    buf.drawText("Left/Right pick, Enter save, Esc back", ix, @intCast(y + h - 2), t.text_dim, t.background, 0) catch {};
+}
+
+fn renderSettingsThemeModal(client: *const ChatClient, buf: *OptimizedBuffer) void {
+    const t = client.theme;
+    const w: u16 = @min(44, client.width -| 4);
+    const max_h: u16 = @min(18, client.height -| 4);
+    const theme_count: u16 = @intCast(theme_mod.themes.len);
+    const h: u16 = @min(max_h, theme_count + 4);
+    const x = @max(2, (client.width -| w) / 2);
+    const y = @max(2, (client.height -| h) / 2);
+
+    drawBorderBox(buf, x, y, w, h, t.primary, t.background, "Change Theme", t.primary);
+
+    const ix: u32 = @intCast(x + 2);
+    var iy: u32 = @intCast(y + 2);
+    const max_rows: u32 = @intCast(h -| 4);
+
+    for (&theme_mod.themes, 0..) |theme_entry, i| {
+        if (iy - @as(u32, @intCast(y + 2)) >= max_rows) break;
+        const is_selected = i == client.settings_theme_idx;
+        const is_current = std.mem.eql(u8, theme_entry.id, client.theme.id);
+        const fg = if (is_selected) t.background else t.text;
+        const bg = if (is_selected) t.primary else t.background;
+
+        if (is_selected) {
+            buf.fillRect(ix, iy, @intCast(w -| 4), 1, bg) catch {};
+        }
+
+        const prefix: []const u8 = if (is_selected) "> " else "  ";
+        buf.drawText(prefix, ix, iy, fg, bg, 0) catch {};
+        buf.drawText(theme_entry.name, ix + 2, iy, fg, bg, 1) catch {};
+
+        // Color swatches
+        const swatch_x = ix + 20;
+        buf.fillRect(swatch_x, iy, 2, 1, theme_entry.accent) catch {};
+        buf.fillRect(swatch_x + 2, iy, 2, 1, theme_entry.success) catch {};
+        buf.fillRect(swatch_x + 4, iy, 2, 1, theme_entry.warning) catch {};
+        buf.fillRect(swatch_x + 6, iy, 2, 1, theme_entry.err) catch {};
+
+        if (is_current) {
+            buf.drawText(" *", swatch_x + 8, iy, t.text_muted, bg, 0) catch {};
+        }
+
+        iy += 1;
+    }
+
+    buf.drawText("Up/Down pick, Enter save, Esc back", ix, @intCast(y + h - 2), t.text_dim, t.background, 0) catch {};
+}
+
+fn renderSettingsKeybindingsModal(client: *const ChatClient, buf: *OptimizedBuffer) void {
+    const t = client.theme;
+    const w: u16 = @min(50, client.width -| 4);
+    const h: u16 = @min(20, client.height -| 4);
+    const x = @max(2, (client.width -| w) / 2);
+    const y = @max(2, (client.height -| h) / 2);
+
+    drawBorderBox(buf, x, y, w, h, t.primary, t.background, "Keybindings", t.primary);
+
+    const ix: u32 = @intCast(x + 2);
+    var iy: u32 = @intCast(y + 2);
+    const max_rows: u32 = @intCast(h -| 4);
+
+    // Show current keybindings (read-only view)
+    const bindings = [_][2][]const u8{
+        .{ "Escape", "Close / quit" },
+        .{ "Ctrl+Q", "Quit immediately" },
+        .{ "F1", "Toggle help" },
+        .{ "Ctrl+S", "Settings" },
+        .{ "Ctrl+T", "Toggle timestamps" },
+        .{ "Ctrl+G", "Toggle avatars" },
+        .{ "Ctrl+U", "User picker" },
+        .{ "Ctrl+N", "New DM" },
+        .{ "Ctrl+L", "Leave DM" },
+        .{ "Ctrl+A", "Add DM member" },
+        .{ "Ctrl+Left", "Prev channel" },
+        .{ "Ctrl+Right", "Next channel" },
+        .{ "Ctrl+R", "React" },
+    };
+
+    for (bindings, 0..) |b, i| {
+        if (iy - @as(u32, @intCast(y + 2)) >= max_rows) break;
+        const is_selected = i == client.settings_kb_idx;
+        const fg = if (is_selected) t.background else t.text;
+        const bg = if (is_selected) t.primary else t.background;
+
+        if (is_selected) {
+            buf.fillRect(ix, iy, @intCast(w -| 4), 1, bg) catch {};
+        }
+
+        buf.drawText(b[0], ix, iy, if (is_selected) fg else t.primary, bg, 1) catch {};
+        buf.drawText(b[1], ix + 18, iy, fg, bg, 0) catch {};
+        iy += 1;
+    }
+
+    buf.drawText("(Read-only) Esc back", ix, @intCast(y + h - 2), t.text_dim, t.background, 0) catch {};
+}
+
+fn renderSettingsAvatarModal(client: *const ChatClient, buf: *OptimizedBuffer) void {
+    const t = client.theme;
+    const w: u16 = @min(40, client.width -| 4);
+    const h: u16 = 8;
+    const x = @max(2, (client.width -| w) / 2);
+    const y = @max(2, (client.height -| h) / 2);
+
+    drawBorderBox(buf, x, y, w, h, t.primary, t.background, "Avatar Designer", t.primary);
+
+    const ix: u32 = @intCast(x + 2);
+    const iy: u32 = @intCast(y + 2);
+
+    // Show 3 glyph slots with cursor
+    for (0..3) |col| {
+        const cx = ix + @as(u32, @intCast(col)) * 6;
+        const is_cursor = col == client.settings_avatar_col;
+        const glyph_idx = client.settings_avatar_draft[col];
+
+        if (is_cursor) {
+            buf.drawText("[", cx, iy, t.primary, t.background, 0) catch {};
+            buf.drawText("]", cx + 4, iy, t.primary, t.background, 0) catch {};
+        }
+
+        // Show glyph index as a placeholder
+        var idx_buf: [3]u8 = undefined;
+        _ = std.fmt.bufPrint(&idx_buf, "{d:0>2}", .{glyph_idx}) catch {};
+        buf.drawText(idx_buf[0..2], cx + 1, iy, t.text, t.background, 0) catch {};
+    }
+
+    buf.drawText("Left/Right move, Up/Down cycle", ix, iy + 2, t.text_dim, t.background, 0) catch {};
+    buf.drawText("Esc back", ix, @intCast(y + h - 2), t.text_dim, t.background, 0) catch {};
 }
