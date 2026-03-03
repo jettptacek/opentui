@@ -209,3 +209,27 @@ pub const DirtyFlags = packed struct {
         };
     }
 };
+
+/// Calculate how many display rows a message needs given the available width.
+/// Accounts for the "username: " prefix on the first line.
+/// Subsequent wrapped lines are indented to align with content after the prefix.
+pub fn msgRowCount(msg: *const Message, available_width: usize) usize {
+    if (available_width == 0) return 1;
+    const name_len = msg.from_name_len;
+    const content_len = msg.content_len;
+    // Prefix: "name: " (name + 2 for ": ") + 1 for left padding
+    const prefix_len: usize = @as(usize, name_len) + 3;
+    if (prefix_len >= available_width) {
+        // Panel too narrow — everything on separate rows
+        if (content_len == 0) return 1;
+        return 1 + (content_len + available_width - 1) / available_width;
+    }
+    const content_cols_first_line = available_width - prefix_len;
+    if (content_len <= content_cols_first_line) return 1;
+    const remaining = content_len - content_cols_first_line;
+    // Wrapped lines use full width (indented to prefix_len for visual alignment,
+    // but we wrap at available_width for simplicity)
+    const wrap_width = available_width - 2; // 2 for left margin on wrapped lines
+    if (wrap_width == 0) return 2;
+    return 1 + (remaining + wrap_width - 1) / wrap_width;
+}

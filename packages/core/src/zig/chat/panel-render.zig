@@ -161,48 +161,100 @@ fn renderMessages(client: *const ChatClient, panel: *const Panel, buf: *Optimize
         return;
     }
 
-    // Render messages from bottom up, starting from scroll offset
-    const max_rows: usize = @intCast(ih);
-    var row: usize = max_rows;
-    const start_idx: usize = if (msgs.len > @as(usize, @intCast(@max(0, client.msg_scroll_offset))))
-        msgs.len - @as(usize, @intCast(@max(0, client.msg_scroll_offset)))
-    else
-        0;
+    const available_width: usize = @intCast(iw);
+    const visible_rows: usize = @intCast(ih);
+    const scroll_offset: usize = @intCast(@max(0, client.msg_scroll_offset));
 
-    var msg_idx: usize = start_idx;
-    while (msg_idx > 0 and row > 0) {
+    // Render messages bottom-up with word wrapping.
+    // msg_scroll_offset is the number of rows hidden below the viewport.
+    // We iterate messages from newest (end) to oldest, tracking how many rows
+    // each message contributes. We skip rows for the scroll offset, then draw
+    // rows that fall within the visible window.
+
+    var rows_placed: usize = 0; // rows counted from the bottom (including scrolled-off)
+    var screen_row: usize = visible_rows; // next screen row to fill (top = 0, bottom = visible_rows-1)
+    var msg_idx: usize = msgs.len;
+
+    while (msg_idx > 0 and screen_row > 0) {
         msg_idx -= 1;
-        row -= 1;
-
         const msg = &msgs[msg_idx];
-        const y_pos: u32 = @intCast(iy + @as(u16, @intCast(row)));
+        const msg_rows = types.msgRowCount(msg, available_width);
 
-        // Format: "{username}: {content}"
         const name = msg.fromNameSlice();
-        buf.drawText(name, @intCast(ix + 1), y_pos, msg.from_color, t.background, 1) catch {};
-
-        const sep = ": ";
-        const name_end: u32 = @intCast(ix + 1 + @as(u16, @intCast(name.len)));
-        buf.drawText(sep, name_end, y_pos, t.text, t.background, 0) catch {};
-
         const content = msg.contentSlice();
-        const content_x: u32 = name_end + 2;
-        const max_content = @min(content.len, @as(usize, @intCast(ix + iw)) -| @as(usize, content_x));
-        if (max_content > 0) {
-            buf.drawText(content[0..max_content], content_x, y_pos, t.text, t.background, 0) catch {};
-        }
+        const prefix_len: usize = @as(usize, name.len) + 3; // " name: "
+        const content_first = if (prefix_len < available_width) available_width - prefix_len else 0;
+        const wrap_width = if (available_width > 2) available_width - 2 else available_width;
 
-        // Timestamp
-        if (client.show_timestamps and msg.timestamp > 0) {
-            // Format HH:MM (simplified — just show raw for now)
-            var time_buf: [5]u8 = undefined;
-            const secs = @divFloor(msg.timestamp, 1000);
-            const hours: u32 = @intCast(@mod(@divFloor(secs, 3600), 24));
-            const mins: u32 = @intCast(@mod(@divFloor(secs, 60), 60));
-            _ = std.fmt.bufPrint(&time_buf, "{d:0>2}:{d:0>2}", .{ hours, mins }) catch {};
-            const ts_x: u32 = @intCast(ix + iw - 6);
-            buf.drawText(time_buf[0..5], ts_x, y_pos, t.timestamp, t.background, 0) catch {};
+        // is_selected check
+        const is_selected = client.selected_msg_idx >= 0 and @as(usize, @intCast(client.selected_msg_idx)) == msg_idx;
+        const content_fg = if (is_selected) t.accent else t.text;
+        const name_attr: u32 = if (is_selected) 1 | 4 else 1; // bold + underline if selected
+        const bg = if (is_selected) t.background_panel else t.background;
+
+        // Iterate the rows of this message from bottom (last wrap line) to top (first line with name)
+        var line: usize = msg_rows;
+        while (line > 0 and screen_row > 0) {
+            line -= 1;
+            if (rows_placed < scroll_offset) {
+                // This row is scrolled off below the viewport
+                rows_placed += 1;
+                continue;
+            }
+            screen_row -= 1;
+            rows_placed += 1;
+
+            const y_pos: u32 = @intCast(iy + @as(u16, @intCast(screen_row)));
+
+            // Draw selection highlight background across the full row
+            if (is_selected) {
+                var col: usize = 0;
+                while (col < available_width) : (col += 1) {
+                    buf.drawText(" ", @intCast(ix + @as(u16, @intCast(col))), y_pos, bg, bg, 0) catch {};
+                }
+            }
+
+            if (line == 0) {
+                // First line: "name: content_start"
+                buf.drawText(name, @intCast(ix + 1), y_pos, msg.from_color, bg, name_attr) catch {};
+                const name_end: u32 = @intCast(ix + 1 + @as(u16, @intCast(name.len)));
+                buf.drawText(": ", name_end, y_pos, t.text, bg, 0) catch {};
+
+                if (content_first > 0 and content.len > 0) {
+                    const first_len = @min(content.len, content_first);
+                    buf.drawText(content[0..first_len], name_end + 2, y_pos, content_fg, bg, 0) catch {};
+                }
+
+                // Timestamp on first line only
+                if (client.show_timestamps and msg.timestamp > 0 and !is_selected) {
+                    var time_buf: [5]u8 = undefined;
+                    const secs = @divFloor(msg.timestamp, 1000);
+                    const hours: u32 = @intCast(@mod(@divFloor(secs, 3600), 24));
+                    const mins: u32 = @intCast(@mod(@divFloor(secs, 60), 60));
+                    _ = std.fmt.bufPrint(&time_buf, "{d:0>2}:{d:0>2}", .{ hours, mins }) catch {};
+                    const ts_x: u32 = @intCast(ix + iw - 6);
+                    buf.drawText(time_buf[0..5], ts_x, y_pos, t.timestamp, bg, 0) catch {};
+                }
+            } else {
+                // Continuation line: indented content
+                const offset = content_first + (line - 1) * wrap_width;
+                if (offset < content.len) {
+                    const remaining = content.len - offset;
+                    const line_len = @min(remaining, wrap_width);
+                    buf.drawText(content[offset .. offset + line_len], @intCast(ix + 2), y_pos, content_fg, bg, 0) catch {};
+                }
+            }
         }
+    }
+
+    // Scroll indicator: show "v N more v" at bottom when scrolled up from newest
+    if (scroll_offset > 0) {
+        var indicator_buf: [32]u8 = undefined;
+        const indicator = std.fmt.bufPrint(&indicator_buf, " \xE2\x96\xBC {d} more \xE2\x96\xBC ", .{scroll_offset}) catch " \xE2\x96\xBC more \xE2\x96\xBC ";
+        const ind_len: u16 = @intCast(@min(indicator.len, available_width));
+        const ind_x = ix + (iw -| ind_len) / 2;
+        const ind_y: u32 = @intCast(iy + ih - 1);
+        buf.drawText(indicator[0..ind_len], @intCast(ind_x), ind_y, t.warning, t.background, 1) catch {};
     }
 }
 

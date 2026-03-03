@@ -331,6 +331,13 @@ pub const ChatClient = struct {
 
     pub fn addMessage(self: *ChatClient, msg: Message) !void {
         if (self.messages.items.len >= types.MAX_MESSAGES) {
+            // Adjust scroll offset for the rows lost by removing the oldest message
+            if (self.msg_scroll_offset > 0) {
+                const panel_idx = self.findPanelByKind(.messages);
+                const available_width: usize = if (panel_idx) |idx| self.panels[idx].innerWidth() else 40;
+                const removed_rows: i32 = @intCast(types.msgRowCount(&self.messages.items[0], available_width));
+                self.msg_scroll_offset = @max(0, self.msg_scroll_offset - removed_rows);
+            }
             _ = self.messages.orderedRemove(0);
         }
         try self.messages.append(self.allocator, msg);
@@ -581,6 +588,16 @@ pub const ChatClient = struct {
         // Tab / Shift+Tab → focus cycling
         if (special == .tab) {
             self.cycleFocus(!key.hasShift());
+            return;
+        }
+
+        // Page Up / Page Down → scroll messages (works from any panel)
+        if (special == .page_up) {
+            self.scrollMessages(10);
+            return;
+        }
+        if (special == .page_down) {
+            self.scrollMessages(-10);
             return;
         }
 
@@ -1084,12 +1101,14 @@ pub const ChatClient = struct {
         if (msg_count == 0) return;
 
         if (special == .up or (key.isChar() and key.charValue() == 'k')) {
-            // Scroll up or select previous message
+            // Select previous message
             if (self.selected_msg_idx < 0) {
                 self.selected_msg_idx = msg_count - 1;
             } else if (self.selected_msg_idx > 0) {
                 self.selected_msg_idx -= 1;
             }
+            // Auto-scroll to keep selection visible
+            self.scrollToShowSelection();
             self.dirty.messages = true;
             self.render_requested = true;
         } else if (special == .down or (key.isChar() and key.charValue() == 'j')) {
@@ -1100,16 +1119,92 @@ pub const ChatClient = struct {
                     self.selected_msg_idx = -1; // deselect
                 }
             }
+            // Auto-scroll to keep selection visible
+            self.scrollToShowSelection();
             self.dirty.messages = true;
             self.render_requested = true;
-        } else if (special == .page_up) {
-            self.msg_scroll_offset += 10;
-            self.dirty.messages = true;
-            self.render_requested = true;
-        } else if (special == .page_down) {
-            self.msg_scroll_offset = @max(0, self.msg_scroll_offset - 10);
-            self.dirty.messages = true;
-            self.render_requested = true;
+        }
+        // Note: Page Up/Down handled globally in handleChatInput
+    }
+
+    /// Scroll messages by delta rows (positive = up/older, negative = down/newer).
+    /// Clamps to valid range [0, max_offset].
+    fn scrollMessages(self: *ChatClient, delta: i32) void {
+        const msg_count: i32 = @intCast(self.messages.items.len);
+        if (msg_count == 0) return;
+        const max_offset = self.maxScrollOffset();
+        self.msg_scroll_offset = @max(0, @min(max_offset, self.msg_scroll_offset + delta));
+        self.dirty.messages = true;
+        self.render_requested = true;
+    }
+
+    /// Compute the maximum valid scroll offset (total rows - visible rows, minimum 0).
+    fn maxScrollOffset(self: *const ChatClient) i32 {
+        const panel_idx = self.findPanelByKind(.messages) orelse return 0;
+        const panel = &self.panels[panel_idx];
+        const visible_rows: usize = panel.innerHeight();
+        const available_width: usize = panel.innerWidth();
+        if (visible_rows == 0 or available_width == 0) return 0;
+        const total_rows = self.totalMessageRows(available_width);
+        if (total_rows <= visible_rows) return 0;
+        return @intCast(total_rows - visible_rows);
+    }
+
+    /// Get the inner height of the messages panel (visible rows for messages).
+    fn messagesVisibleRows(self: *const ChatClient) usize {
+        if (self.findPanelByKind(.messages)) |idx| {
+            return self.panels[idx].innerHeight();
+        }
+        return 0;
+    }
+
+    /// Total display rows across all messages (accounts for word wrap).
+    fn totalMessageRows(self: *const ChatClient, available_width: usize) usize {
+        var total: usize = 0;
+        for (self.messages.items) |*msg| {
+            total += types.msgRowCount(msg, available_width);
+        }
+        return total;
+    }
+
+    /// Adjust scroll offset so the selected message is within the visible window.
+    fn scrollToShowSelection(self: *ChatClient) void {
+        if (self.selected_msg_idx < 0) return;
+        const sel: usize = @intCast(self.selected_msg_idx);
+        const msgs = self.messages.items;
+        if (sel >= msgs.len) return;
+
+        const visible_rows = self.messagesVisibleRows();
+        if (visible_rows == 0) return;
+        const available_width: usize = @intCast(if (self.findPanelByKind(.messages)) |idx| self.panels[idx].innerWidth() else return);
+
+        // Calculate the row range of the selected message (from bottom)
+        // Row 0 = bottom-most row of the last message
+        var rows_from_bottom: usize = 0;
+        var i: usize = msgs.len;
+        while (i > sel) {
+            i -= 1;
+            rows_from_bottom += types.msgRowCount(&msgs[i], available_width);
+        }
+        // rows_from_bottom now points to the TOP of the selected message
+        const sel_rows = types.msgRowCount(&msgs[sel], available_width);
+        // The selected message occupies rows [rows_from_bottom - sel_rows + 1 .. rows_from_bottom] from bottom
+        // But we computed by summing messages BELOW sel, so rows_from_bottom = total rows below sel (exclusive)
+        // Actually: rows_from_bottom = sum of rows for msgs[sel+1..len]
+        // The selected message's bottom row is at offset = rows_from_bottom
+        // The selected message's top row is at offset = rows_from_bottom + sel_rows - 1
+
+        const sel_bottom = rows_from_bottom;
+        const sel_top = rows_from_bottom + sel_rows - 1;
+        const offset: usize = @intCast(@max(0, self.msg_scroll_offset));
+
+        // If selected message top is above the visible window, scroll up
+        if (sel_top >= offset + visible_rows) {
+            self.msg_scroll_offset = @intCast(sel_top - visible_rows + 1);
+        }
+        // If selected message bottom is below the visible window, scroll down
+        if (sel_bottom < offset) {
+            self.msg_scroll_offset = @intCast(sel_bottom);
         }
     }
 
