@@ -870,7 +870,13 @@ pub const ChatClient = struct {
             if (self.settings_name_edit_buffer) |eb| {
                 const name_len = eb.getText(&_get_text_buf);
                 if (name_len > 0 and name_len <= types.MAX_NAME_LEN) {
-                    _ = self.events.pushUpdateProfile("name", _get_text_buf[0..name_len]);
+                    const new_name = _get_text_buf[0..name_len];
+                    // Apply locally for immediate feedback
+                    if (self.me) |*me| {
+                        @memcpy(me.name[0..name_len], new_name);
+                        me.name_len = @intCast(name_len);
+                    }
+                    _ = self.events.pushUpdateProfile("name", new_name);
                 }
             }
             self.openModal(.settings_menu); // back to menu
@@ -904,6 +910,10 @@ pub const ChatClient = struct {
         } else if (special == .enter) {
             // Save color — convert RGBA to hex string
             const color = panel_render.REGISTER_COLORS[self.settings_color_idx];
+            // Apply locally for immediate feedback
+            if (self.me) |*me| {
+                me.color = color;
+            }
             var hex_buf: [7]u8 = undefined;
             _ = std.fmt.bufPrint(&hex_buf, "#{x:0>2}{x:0>2}{x:0>2}", .{
                 @as(u8, @intFromFloat(color[0] * 255.0)),
@@ -933,6 +943,7 @@ pub const ChatClient = struct {
             self.render_requested = true;
         } else if (special == .enter) {
             const theme_entry = &theme_mod.themes[self.settings_theme_idx];
+            self.setTheme(theme_entry.id); // apply immediately for instant feedback
             _ = self.events.pushUpdateProfile("theme", theme_entry.id);
             self.openModal(.settings_menu);
         }
