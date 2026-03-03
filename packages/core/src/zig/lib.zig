@@ -1702,13 +1702,17 @@ export fn chatClientSetUser(
     b: f32,
     a: f32,
     role: u8,
+    avatarPtr: [*]const u8,
+    avatarLen: usize,
 ) void {
     const color: buffer.RGBA = .{ r, g, b, a };
-    client.setUser(namePtr[0..nameLen], color, @enumFromInt(role));
+    client.setUser(namePtr[0..nameLen], color, @enumFromInt(role), avatarPtr[0..avatarLen]);
 }
 
 export fn chatClientAddMessage(
     client: *chat_client_mod.ChatClient,
+    msgIdPtr: [*]const u8,
+    msgIdLen: usize,
     fromNamePtr: [*]const u8,
     fromNameLen: usize,
     fromR: f32,
@@ -1724,6 +1728,10 @@ export fn chatClientAddMessage(
 ) void {
     const types = @import("chat/types.zig");
     var msg = types.Message{};
+
+    const idlen = @min(msgIdLen, 36);
+    @memcpy(msg.id[0..idlen], msgIdPtr[0..idlen]);
+    msg.id_len = @intCast(idlen);
 
     const nlen = @min(fromNameLen, types.MAX_NAME_LEN);
     @memcpy(msg.from_name[0..nlen], fromNamePtr[0..nlen]);
@@ -1775,6 +1783,30 @@ export fn chatClientAddChannel(
     client.render_requested = true;
 }
 
+/// Increment the unread count for a channel by name.
+export fn chatClientIncrementUnread(
+    client: *chat_client_mod.ChatClient,
+    channelPtr: [*]const u8,
+    channelLen: usize,
+) void {
+    const types = @import("chat/types.zig");
+    const name = channelPtr[0..@min(channelLen, types.MAX_CHANNEL_NAME_LEN)];
+    for (client.channels.items) |*ch| {
+        if (std.mem.eql(u8, ch.nameSlice(), name)) {
+            ch.unread_count +|= 1;
+            client.dirty.channels = true;
+            client.render_requested = true;
+            return;
+        }
+    }
+}
+
+export fn chatClientClearUsers(client: *chat_client_mod.ChatClient) void {
+    client.users.clearRetainingCapacity();
+    client.dirty.members = true;
+    client.render_requested = true;
+}
+
 export fn chatClientAddUser(
     client: *chat_client_mod.ChatClient,
     namePtr: [*]const u8,
@@ -1784,6 +1816,8 @@ export fn chatClientAddUser(
     b: f32,
     a: f32,
     role: u8,
+    avatarPtr: [*]const u8,
+    avatarLen: usize,
 ) void {
     const types = @import("chat/types.zig");
     var user = types.User{};
@@ -1792,6 +1826,11 @@ export fn chatClientAddUser(
     user.name_len = @intCast(len);
     user.color = .{ r, g, b, a };
     user.role = @enumFromInt(role);
+    const alen = @min(avatarLen, types.MAX_AVATAR_PATTERN_LEN);
+    if (alen > 0) {
+        @memcpy(user.avatar_pattern[0..alen], avatarPtr[0..alen]);
+        user.avatar_pattern_len = @intCast(alen);
+    }
     client.users.append(globalAllocator, user) catch {};
     client.dirty.members = true;
     client.render_requested = true;
@@ -1871,4 +1910,68 @@ export fn chatClientPollEvent(
 /// Check if the client has pending outgoing events.
 export fn chatClientHasEvents(client: *const chat_client_mod.ChatClient) bool {
     return client.events.hasEvents();
+}
+
+/// Update reactions on a message by its ID.
+/// reaction_data format: pair_count(u8) + (emoji_idx(u8) + count_le16)*N
+export fn chatClientUpdateReactions(
+    client: *chat_client_mod.ChatClient,
+    msgIdPtr: [*]const u8,
+    msgIdLen: usize,
+    reactionDataPtr: [*]const u8,
+    reactionDataLen: usize,
+) void {
+    const id_len = @min(msgIdLen, 36);
+    const data_len = @min(reactionDataLen, 256);
+    client.updateMessageReactions(
+        msgIdPtr[0..id_len],
+        reactionDataPtr[0..data_len],
+    );
+}
+
+/// Set a user as typing (add to typing indicator list).
+export fn chatClientSetTypingUser(
+    client: *chat_client_mod.ChatClient,
+    namePtr: [*]const u8,
+    nameLen: usize,
+) void {
+    const types = @import("chat/types.zig");
+    const len = @min(nameLen, types.MAX_NAME_LEN);
+    client.setTypingUser(namePtr[0..len]);
+}
+
+/// Set a single keybinding on the client (called from TS when loading saved bindings).
+/// cmd_idx: BindableCommand enum value (0..12)
+/// tag: 0=char, 1=special
+/// code: Unicode codepoint or SpecialKey value
+/// modifiers: bit0=ctrl, bit1=shift
+export fn chatClientSetKeybinding(
+    client: *chat_client_mod.ChatClient,
+    cmd_idx: u8,
+    tag: u8,
+    code: u32,
+    modifiers: u8,
+) void {
+    client.setKeybinding(cmd_idx, tag, code, modifiers);
+}
+
+/// Set the panel layout from a JSON string.
+export fn chatClientSetLayout(
+    client: *chat_client_mod.ChatClient,
+    jsonPtr: [*]const u8,
+    jsonLen: usize,
+) void {
+    if (jsonLen == 0 or jsonLen > 4096) return;
+    client.setLayout(jsonPtr[0..jsonLen]);
+}
+
+/// Clear a user from the typing indicator list.
+export fn chatClientClearTypingUser(
+    client: *chat_client_mod.ChatClient,
+    namePtr: [*]const u8,
+    nameLen: usize,
+) void {
+    const types = @import("chat/types.zig");
+    const len = @min(nameLen, types.MAX_NAME_LEN);
+    client.clearTypingUser(namePtr[0..len]);
 }

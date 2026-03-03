@@ -1132,11 +1132,11 @@ function getOpenTUILib(libPath?: string) {
       returns: "void",
     },
     chatClientSetUser: {
-      args: ["ptr", "ptr", "usize", "f32", "f32", "f32", "f32", "u8"],
+      args: ["ptr", "ptr", "usize", "f32", "f32", "f32", "f32", "u8", "ptr", "usize"],
       returns: "void",
     },
     chatClientAddMessage: {
-      args: ["ptr", "ptr", "usize", "f32", "f32", "f32", "f32", "u8", "ptr", "usize", "ptr", "usize", "i64"],
+      args: ["ptr", "ptr", "usize", "ptr", "usize", "f32", "f32", "f32", "f32", "u8", "ptr", "usize", "ptr", "usize", "i64"],
       returns: "void",
     },
     chatClientSetChannel: {
@@ -1148,7 +1148,7 @@ function getOpenTUILib(libPath?: string) {
       returns: "void",
     },
     chatClientAddUser: {
-      args: ["ptr", "ptr", "usize", "f32", "f32", "f32", "f32", "u8"],
+      args: ["ptr", "ptr", "usize", "f32", "f32", "f32", "f32", "u8", "ptr", "usize"],
       returns: "void",
     },
     chatClientRemoveUser: {
@@ -1182,6 +1182,34 @@ function getOpenTUILib(libPath?: string) {
     chatClientHasEvents: {
       args: ["ptr"],
       returns: "bool",
+    },
+    chatClientSetTypingUser: {
+      args: ["ptr", "ptr", "usize"],
+      returns: "void",
+    },
+    chatClientClearTypingUser: {
+      args: ["ptr", "ptr", "usize"],
+      returns: "void",
+    },
+    chatClientUpdateReactions: {
+      args: ["ptr", "ptr", "usize", "ptr", "usize"],
+      returns: "void",
+    },
+    chatClientClearUsers: {
+      args: ["ptr"],
+      returns: "void",
+    },
+    chatClientIncrementUnread: {
+      args: ["ptr", "ptr", "usize"],
+      returns: "void",
+    },
+    chatClientSetKeybinding: {
+      args: ["ptr", "u8", "u8", "u32", "u8"],
+      returns: "void",
+    },
+    chatClientSetLayout: {
+      args: ["ptr", "ptr", "usize"],
+      returns: "void",
     },
   })
 

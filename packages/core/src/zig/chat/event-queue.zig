@@ -13,12 +13,11 @@ pub const MAX_EVENTS = 32;
 pub const EventTag = enum(u8) {
     send_message = 1, // payload: channel_len(u8) + channel + content
     switch_channel = 2, // payload: channel name
-    register = 3, // payload: name_len(u8) + name + color(4xf32) + theme_id
     quit = 4, // no payload
     typing_start = 5, // no payload (TS infers channel from current state)
     typing_stop = 6, // no payload
     leave_dm = 7, // no payload (TS infers channel)
-    toggle_reaction = 8, // payload: msg_id + emoji
+    toggle_reaction = 8, // payload: msg_id_len(u8) + msg_id + emoji
     focus_changed = 9, // payload: panel_kind(u8)
     update_profile = 10, // payload: field_len(u8) + field + value
     create_dm = 11, // payload: user_count(u8) + (name_len(u8) + name)*N
@@ -77,33 +76,6 @@ pub const EventQueue = struct {
         @memcpy(buf[2 .. 2 + channel.len], channel);
         @memcpy(buf[2 + channel.len .. 2 + channel.len + content.len], content);
         self.lengths[self.tail] = @intCast(total);
-        self.tail = (self.tail + 1) % MAX_EVENTS;
-        self.count += 1;
-        return true;
-    }
-
-    /// Push a register event: tag(1) + name_len(1) + name + r(f32) + g + b + a + theme_id
-    pub fn pushRegister(self: *EventQueue, name: []const u8, color: [4]f32, theme_id: []const u8) bool {
-        if (self.count >= MAX_EVENTS) return false;
-        const total = 1 + 1 + name.len + 16 + theme_id.len;
-        if (total > MAX_EVENT_SIZE) return false;
-        var buf = &self.events[self.tail];
-        var off: usize = 0;
-        buf[off] = @intFromEnum(EventTag.register);
-        off += 1;
-        buf[off] = @intCast(name.len);
-        off += 1;
-        @memcpy(buf[off .. off + name.len], name);
-        off += name.len;
-        // Color as 4 little-endian f32
-        inline for (0..4) |ci| {
-            const bytes = std.mem.toBytes(color[ci]);
-            @memcpy(buf[off .. off + 4], &bytes);
-            off += 4;
-        }
-        @memcpy(buf[off .. off + theme_id.len], theme_id);
-        off += theme_id.len;
-        self.lengths[self.tail] = @intCast(off);
         self.tail = (self.tail + 1) % MAX_EVENTS;
         self.count += 1;
         return true;

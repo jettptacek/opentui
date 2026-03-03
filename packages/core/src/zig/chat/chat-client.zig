@@ -97,10 +97,28 @@ pub const ChatClient = struct {
     settings_theme_idx: u8,
     settings_kb_idx: u8,
     settings_kb_listening: bool,
+    // Active keybindings (used for input dispatch)
+    keybindings: [types.BINDABLE_COMMAND_COUNT]types.KeyCombo,
+    // Draft keybindings (edited in settings, committed on save)
+    kb_draft: [types.BINDABLE_COMMAND_COUNT]types.KeyCombo,
+
+    // Layout editor state
+    layout_editor_mode: types.EditorMode,
+    layout_cursor_col: u16,
+    layout_cursor_row: u16,
+    layout_anchor_col: u16,
+    layout_anchor_row: u16,
+    layout_panel_type_idx: u8, // index into PANEL_TYPE_LABELS
+    layout_draft_panels: [types.MAX_PANELS]Panel,
+    layout_draft_count: u8,
+    layout_draft_grid_cols: u16,
+    layout_draft_grid_rows: u16,
+    layout_error: [64]u8,
+    layout_error_len: u8,
     settings_avatar_col: u8,
     settings_avatar_draft: [3]u8, // 3-glyph pattern indices
 
-    // Settings name editor (shares register_edit_buffer when in name editing mode)
+    // Settings name editor
     settings_name_edit_buffer: ?*EditBuffer,
     settings_name_editor_view: ?*EditorView,
 
@@ -113,6 +131,8 @@ pub const ChatClient = struct {
 
     // Scroll state for messages panel
     msg_scroll_offset: i32, // 0 = bottom (newest), positive = scrolled up
+    // Unread divider — index of first "new" message (-1 = no divider)
+    unread_divider_idx: i32,
 
     // Channel list selection
     channel_sel_idx: i32,
@@ -125,30 +145,32 @@ pub const ChatClient = struct {
     compose_edit_buffer: ?*EditBuffer,
     compose_editor_view: ?*EditorView,
 
-    // Register screen input
-    register_edit_buffer: ?*EditBuffer,
-    register_editor_view: ?*EditorView,
-    register_focus: RegisterFocus,
-    register_color_idx: u8,
-    register_theme_idx: u8,
+    // Typing indicators (incoming — other users typing)
+    typing_users: [types.MAX_TYPING_USERS][types.MAX_NAME_LEN]u8,
+    typing_user_lens: [types.MAX_TYPING_USERS]u8,
+    typing_user_count: u8,
+    // Typing state (outgoing — whether we have emitted typing_start)
+    compose_is_typing: bool,
+
+    // Slash command autocomplete state
+    slash_ac_open: bool,
+    slash_ac_idx: u8, // selected index in filtered list
+    // Filtered indices into SLASH_COMMANDS (populated on each input change)
+    slash_ac_filtered: [types.SLASH_COMMAND_COUNT]u8,
+    slash_ac_filtered_count: u8,
 
     // Event queue (outgoing events from Zig → TS)
     events: EventQueue,
-
-    pub const RegisterFocus = enum(u8) {
-        name = 0,
-        color = 1,
-        theme = 2,
-        submit = 3,
-    };
 
     pub const SETTINGS_MENU_ITEMS = [_][]const u8{
         "Name",
         "Color",
         "Theme",
+        "Avatar",
         "Keybindings",
+        "Layout",
     };
-    pub const SETTINGS_MENU_COUNT: u8 = 4;
+    pub const SETTINGS_MENU_COUNT: u8 = 6;
 
     pub fn create(allocator: Allocator, width: u16, height: u16, output_fd: i32, pool: *gp.GraphemePool) !*ChatClient {
         const self = try allocator.create(ChatClient);
@@ -173,12 +195,6 @@ pub const ChatClient = struct {
         errdefer compose_eb.deinit();
         const compose_ev = try EditorView.init(allocator, compose_eb, 40, 1);
         errdefer compose_ev.deinit();
-
-        // Create register EditBuffer + EditorView
-        const register_eb = try EditBuffer.init(allocator, pool, .wcwidth);
-        errdefer register_eb.deinit();
-        const register_ev = try EditorView.init(allocator, register_eb, 30, 1);
-        errdefer register_ev.deinit();
 
         // Create settings name EditBuffer + EditorView
         const settings_name_eb = try EditBuffer.init(allocator, pool, .wcwidth);
@@ -219,6 +235,20 @@ pub const ChatClient = struct {
             .settings_theme_idx = 0,
             .settings_kb_idx = 0,
             .settings_kb_listening = false,
+            .keybindings = types.DEFAULT_KEYBINDINGS,
+            .kb_draft = types.DEFAULT_KEYBINDINGS,
+            .layout_editor_mode = .navigate,
+            .layout_cursor_col = 0,
+            .layout_cursor_row = 0,
+            .layout_anchor_col = 0,
+            .layout_anchor_row = 0,
+            .layout_panel_type_idx = 0,
+            .layout_draft_panels = undefined,
+            .layout_draft_count = 0,
+            .layout_draft_grid_cols = layout_mod.DEFAULT_GRID_COLS,
+            .layout_draft_grid_rows = layout_mod.DEFAULT_GRID_ROWS,
+            .layout_error = undefined,
+            .layout_error_len = 0,
             .settings_avatar_col = 0,
             .settings_avatar_draft = .{ 0, 0, 0 },
             .settings_name_edit_buffer = settings_name_eb,
@@ -227,16 +257,20 @@ pub const ChatClient = struct {
             .render_requested = true,
             .theme = theme_mod.getDefaultTheme(),
             .msg_scroll_offset = 0,
+            .unread_divider_idx = -1,
             .channel_sel_idx = 0,
             .member_sel_idx = 0,
             .selected_msg_idx = -1,
             .compose_edit_buffer = compose_eb,
             .compose_editor_view = compose_ev,
-            .register_edit_buffer = register_eb,
-            .register_editor_view = register_ev,
-            .register_focus = .name,
-            .register_color_idx = 0,
-            .register_theme_idx = 0,
+            .typing_users = undefined,
+            .typing_user_lens = [_]u8{0} ** types.MAX_TYPING_USERS,
+            .typing_user_count = 0,
+            .compose_is_typing = false,
+            .slash_ac_open = false,
+            .slash_ac_idx = 0,
+            .slash_ac_filtered = [_]u8{0} ** types.SLASH_COMMAND_COUNT,
+            .slash_ac_filtered_count = 0,
             .events = EventQueue.init(),
         };
 
@@ -270,8 +304,6 @@ pub const ChatClient = struct {
         const alloc = self.allocator;
         if (self.compose_editor_view) |ev| ev.deinit();
         if (self.compose_edit_buffer) |eb| eb.deinit();
-        if (self.register_editor_view) |ev| ev.deinit();
-        if (self.register_edit_buffer) |eb| eb.deinit();
         if (self.settings_name_editor_view) |ev| ev.deinit();
         if (self.settings_name_edit_buffer) |eb| eb.deinit();
         self.users.deinit(alloc);
@@ -317,13 +349,18 @@ pub const ChatClient = struct {
         self.render_requested = true;
     }
 
-    pub fn setUser(self: *ChatClient, name: []const u8, color: RGBA, role: types.Role) void {
+    pub fn setUser(self: *ChatClient, name: []const u8, color: RGBA, role: types.Role, avatar: []const u8) void {
         var user = User{};
         const len = @min(name.len, types.MAX_NAME_LEN);
         @memcpy(user.name[0..len], name[0..len]);
         user.name_len = @intCast(len);
         user.color = color;
         user.role = role;
+        const alen = @min(avatar.len, types.MAX_AVATAR_PATTERN_LEN);
+        if (alen > 0) {
+            @memcpy(user.avatar_pattern[0..alen], avatar[0..alen]);
+            user.avatar_pattern_len = @intCast(alen);
+        }
         self.me = user;
         self.dirty.header = true;
         self.render_requested = true;
@@ -335,14 +372,97 @@ pub const ChatClient = struct {
             if (self.msg_scroll_offset > 0) {
                 const panel_idx = self.findPanelByKind(.messages);
                 const available_width: usize = if (panel_idx) |idx| self.panels[idx].innerWidth() else 40;
-                const removed_rows: i32 = @intCast(types.msgRowCount(&self.messages.items[0], available_width));
+                const removed_rows: i32 = @intCast(types.msgRowCountWithAvatar(&self.messages.items[0], available_width, self.avatarCols()));
                 self.msg_scroll_offset = @max(0, self.msg_scroll_offset - removed_rows);
             }
             _ = self.messages.orderedRemove(0);
         }
+        // Set unread divider if user is scrolled up and no divider exists yet
+        if (self.msg_scroll_offset > 0 and self.unread_divider_idx < 0) {
+            self.unread_divider_idx = @intCast(self.messages.items.len);
+        }
         try self.messages.append(self.allocator, msg);
         self.dirty.messages = true;
         self.render_requested = true;
+    }
+
+    /// Update reactions on a message by its ID.
+    /// reaction_data format: count of pairs(u8) + (emoji_idx(u8) + count(u16-le))*N
+    pub fn updateMessageReactions(self: *ChatClient, msg_id: []const u8, reaction_data: []const u8) void {
+        // Find the message by ID
+        for (self.messages.items) |*msg| {
+            if (std.mem.eql(u8, msg.idSlice(), msg_id)) {
+                // Clear existing reactions
+                msg.reaction_counts = [_]u16{0} ** types.MAX_REACTION_TYPES;
+                // Parse reaction data: count(u8) + (emoji_idx(u8) + count_le16)*N
+                if (reaction_data.len == 0) {
+                    self.dirty.messages = true;
+                    self.render_requested = true;
+                    return;
+                }
+                const pair_count = reaction_data[0];
+                var off: usize = 1;
+                var i: u8 = 0;
+                while (i < pair_count and off + 2 < reaction_data.len) : (i += 1) {
+                    const emoji_idx = reaction_data[off];
+                    const count_lo = reaction_data[off + 1];
+                    const count_hi = reaction_data[off + 2];
+                    const count: u16 = @as(u16, count_hi) << 8 | @as(u16, count_lo);
+                    if (emoji_idx < types.MAX_REACTION_TYPES) {
+                        msg.reaction_counts[emoji_idx] = count;
+                    }
+                    off += 3;
+                }
+                self.dirty.messages = true;
+                self.render_requested = true;
+                return;
+            }
+        }
+    }
+
+    /// Add a user to the typing indicators. Ignores duplicates and self.
+    pub fn setTypingUser(self: *ChatClient, name: []const u8) void {
+        // Don't show self as typing
+        if (self.me) |me| {
+            if (std.mem.eql(u8, name, me.nameSlice())) return;
+        }
+        // Check for duplicate
+        for (0..self.typing_user_count) |i| {
+            const existing = self.typing_users[i][0..self.typing_user_lens[i]];
+            if (std.mem.eql(u8, name, existing)) return;
+        }
+        // Add if space available
+        if (self.typing_user_count < types.MAX_TYPING_USERS) {
+            const idx = self.typing_user_count;
+            const len = @min(name.len, types.MAX_NAME_LEN);
+            @memcpy(self.typing_users[idx][0..len], name[0..len]);
+            self.typing_user_lens[idx] = @intCast(len);
+            self.typing_user_count += 1;
+            self.dirty.compose = true;
+            self.render_requested = true;
+        }
+    }
+
+    /// Remove a user from the typing indicators.
+    pub fn clearTypingUser(self: *ChatClient, name: []const u8) void {
+        var i: usize = 0;
+        while (i < self.typing_user_count) {
+            const existing = self.typing_users[i][0..self.typing_user_lens[i]];
+            if (std.mem.eql(u8, name, existing)) {
+                // Shift remaining entries down
+                const count = self.typing_user_count;
+                var j: usize = i;
+                while (j + 1 < count) : (j += 1) {
+                    self.typing_users[j] = self.typing_users[j + 1];
+                    self.typing_user_lens[j] = self.typing_user_lens[j + 1];
+                }
+                self.typing_user_count -= 1;
+                self.dirty.compose = true;
+                self.render_requested = true;
+                return;
+            }
+            i += 1;
+        }
     }
 
     // ---------------------------------------------------------------
@@ -372,122 +492,7 @@ pub const ChatClient = struct {
     pub fn processKeyEvent(self: *ChatClient, key: KeyEvent) void {
         switch (self.screen) {
             .loading => {}, // no input on loading screen
-            .register => self.handleRegisterInput(key),
             .chat => self.handleChatInput(key),
-        }
-    }
-
-    fn handleRegisterInput(self: *ChatClient, key: KeyEvent) void {
-        const special = key.specialKey();
-
-        // Escape → quit
-        if (special == .escape) {
-            _ = self.events.pushTagged(.quit, "");
-            return;
-        }
-
-        // Tab / Shift+Tab → cycle focus
-        if (special == .tab) {
-            if (key.hasShift()) {
-                self.register_focus = switch (self.register_focus) {
-                    .name => .submit,
-                    .color => .name,
-                    .theme => .color,
-                    .submit => .theme,
-                };
-            } else {
-                self.register_focus = switch (self.register_focus) {
-                    .name => .color,
-                    .color => .theme,
-                    .theme => .submit,
-                    .submit => .name,
-                };
-            }
-            self.dirty.markAll();
-            self.render_requested = true;
-            return;
-        }
-
-        switch (self.register_focus) {
-            .name => {
-                // Text input for name field
-                if (self.register_edit_buffer) |eb| {
-                    if (special == .enter) {
-                        // Move to next field
-                        self.register_focus = .color;
-                        self.dirty.markAll();
-                        self.render_requested = true;
-                        return;
-                    }
-                    self.handleEditorInput(eb, key);
-                    self.dirty.markAll();
-                    self.render_requested = true;
-                }
-            },
-            .color => {
-                if (special == .left) {
-                    if (self.register_color_idx > 0) {
-                        self.register_color_idx -= 1;
-                    } else {
-                        self.register_color_idx = 7; // 8 colors, wrap around
-                    }
-                    self.dirty.markAll();
-                    self.render_requested = true;
-                } else if (special == .right) {
-                    if (self.register_color_idx < 7) {
-                        self.register_color_idx += 1;
-                    } else {
-                        self.register_color_idx = 0;
-                    }
-                    self.dirty.markAll();
-                    self.render_requested = true;
-                } else if (special == .enter) {
-                    self.submitRegistration();
-                }
-            },
-            .theme => {
-                if (special == .left) {
-                    if (self.register_theme_idx > 0) {
-                        self.register_theme_idx -= 1;
-                    } else {
-                        self.register_theme_idx = @intCast(theme_mod.themes.len - 1);
-                    }
-                    self.dirty.markAll();
-                    self.render_requested = true;
-                } else if (special == .right) {
-                    if (self.register_theme_idx < theme_mod.themes.len - 1) {
-                        self.register_theme_idx += 1;
-                    } else {
-                        self.register_theme_idx = 0;
-                    }
-                    self.dirty.markAll();
-                    self.render_requested = true;
-                } else if (special == .enter) {
-                    self.submitRegistration();
-                }
-            },
-            .submit => {
-                if (special == .enter) {
-                    self.submitRegistration();
-                }
-            },
-        }
-    }
-
-    fn submitRegistration(self: *ChatClient) void {
-        if (self.register_edit_buffer) |eb| {
-            const name_len = eb.getText(&_get_text_buf);
-            if (name_len == 0) return; // validation: name required
-            if (name_len > types.MAX_NAME_LEN) return;
-
-            const color = panel_render.REGISTER_COLORS[self.register_color_idx];
-            const theme_id = theme_mod.themes[self.register_theme_idx].id;
-
-            _ = self.events.pushRegister(
-                _get_text_buf[0..name_len],
-                color,
-                theme_id,
-            );
         }
     }
 
@@ -496,14 +501,10 @@ pub const ChatClient = struct {
 
         // --- Global keys (always processed, even with modals) ---
 
-        // Ctrl+Q → immediate quit (always works)
-        if (key.isChar() and key.hasCtrl()) {
-            if (key.charValue()) |ch| {
-                if (ch == 'q') {
-                    _ = self.events.pushTagged(.quit, "");
-                    return;
-                }
-            }
+        // Quit immediately — always works, even in modals
+        if (self.matchesBinding(key, .quit_immediate)) {
+            _ = self.events.pushTagged(.quit, "");
+            return;
         }
 
         // --- Modal input takes priority ---
@@ -514,8 +515,16 @@ pub const ChatClient = struct {
 
         // --- Non-modal global keys ---
 
-        // Escape → close help, deselect message, or quit
-        if (special == .escape) {
+        // "Quit" binding → context-sensitive: close autocomplete, close help, deselect message
+        if (self.matchesBinding(key, .quit)) {
+            if (self.slash_ac_open) {
+                self.slash_ac_open = false;
+                self.slash_ac_idx = 0;
+                self.slash_ac_filtered_count = 0;
+                self.dirty.compose = true;
+                self.render_requested = true;
+                return;
+            }
             if (self.show_help) {
                 self.show_help = false;
                 self.dirty.markAll();
@@ -528,87 +537,92 @@ pub const ChatClient = struct {
                 self.render_requested = true;
                 return;
             }
-            _ = self.events.pushTagged(.quit, "");
             return;
         }
 
-        // F1 → toggle help
-        if (special == .f1) {
+        // Toggle help
+        if (self.matchesBinding(key, .toggle_help)) {
             self.show_help = !self.show_help;
             self.dirty.markAll();
             self.render_requested = true;
             return;
         }
 
-        // Ctrl+T → toggle timestamps
-        if (key.isChar() and key.hasCtrl()) {
-            if (key.charValue()) |ch| {
-                switch (ch) {
-                    't' => {
-                        self.show_timestamps = !self.show_timestamps;
-                        self.dirty.messages = true;
-                        self.render_requested = true;
-                        return;
-                    },
-                    'g' => {
-                        self.show_avatars = !self.show_avatars;
-                        self.dirty.messages = true;
-                        self.render_requested = true;
-                        return;
-                    },
-                    's' => {
-                        self.openSettingsMenu();
-                        return;
-                    },
-                    'u', 'n' => {
-                        self.openUserPicker();
-                        return;
-                    },
-                    'a' => {
-                        self.openAddMember();
-                        return;
-                    },
-                    'r' => {
-                        self.openReactionPicker();
-                        return;
-                    },
-                    'l' => {
-                        // Leave DM
-                        const chan = self.currentChannelSlice();
-                        if (chan.len > 3 and std.mem.startsWith(u8, chan, "dm-")) {
-                            _ = self.events.pushTagged(.leave_dm, "");
-                        }
-                        return;
-                    },
-                    else => {},
-                }
+        // Toggle timestamps
+        if (self.matchesBinding(key, .toggle_timestamps)) {
+            self.show_timestamps = !self.show_timestamps;
+            self.dirty.messages = true;
+            self.render_requested = true;
+            return;
+        }
+
+        // Toggle avatars
+        if (self.matchesBinding(key, .toggle_avatars)) {
+            self.show_avatars = !self.show_avatars;
+            self.dirty.messages = true;
+            self.render_requested = true;
+            return;
+        }
+
+        // Open settings
+        if (self.matchesBinding(key, .open_settings)) {
+            self.openSettingsMenu();
+            return;
+        }
+
+        // User picker / DM
+        if (self.matchesBinding(key, .toggle_users) or self.matchesBinding(key, .new_dm)) {
+            self.openUserPicker();
+            return;
+        }
+
+        // Add DM member
+        if (self.matchesBinding(key, .add_dm_member)) {
+            self.openAddMember();
+            return;
+        }
+
+        // React
+        if (self.matchesBinding(key, .react)) {
+            self.openReactionPicker();
+            return;
+        }
+
+        // Leave DM
+        if (self.matchesBinding(key, .leave_dm)) {
+            const chan = self.currentChannelSlice();
+            if (chan.len > 3 and std.mem.startsWith(u8, chan, "dm-")) {
+                _ = self.events.pushTagged(.leave_dm, "");
             }
-        }
-
-        // Tab / Shift+Tab → focus cycling
-        if (special == .tab) {
-            self.cycleFocus(!key.hasShift());
             return;
         }
 
-        // Page Up / Page Down → scroll messages (works from any panel)
-        if (special == .page_up) {
-            self.scrollMessages(10);
-            return;
-        }
-        if (special == .page_down) {
-            self.scrollMessages(-10);
-            return;
-        }
-
-        // Ctrl+Left / Ctrl+Right → prev/next channel
-        if (special == .left and key.hasCtrl()) {
+        // Prev/next channel
+        if (self.matchesBinding(key, .prev_channel)) {
             self.switchToPrevChannel();
             return;
         }
-        if (special == .right and key.hasCtrl()) {
+        if (self.matchesBinding(key, .next_channel)) {
             self.switchToNextChannel();
             return;
+        }
+
+        // Tab / Shift+Tab → focus cycling (skip when slash autocomplete is open)
+        if (special) |sp| {
+            if (sp == .tab and !self.slash_ac_open) {
+                self.cycleFocus(!key.hasShift());
+                return;
+            }
+
+            // Page Up / Page Down → scroll messages (works from any panel)
+            if (sp == .page_up) {
+                self.scrollMessages(10);
+                return;
+            }
+            if (sp == .page_down) {
+                self.scrollMessages(-10);
+                return;
+            }
         }
 
         // --- Panel-specific input ---
@@ -640,6 +654,7 @@ pub const ChatClient = struct {
             .settings_theme => self.handleSettingsThemeInput(key),
             .settings_keybindings => self.handleSettingsKeybindingsInput(key),
             .settings_avatar => self.handleSettingsAvatarInput(key),
+            .settings_layout => self.handleSettingsLayoutInput(key),
         }
     }
 
@@ -775,10 +790,25 @@ pub const ChatClient = struct {
             self.closeModal();
             return;
         }
+        const target_idx: usize = @intCast(self.reaction_target_msg);
+        if (target_idx >= self.messages.items.len) {
+            self.closeModal();
+            return;
+        }
+        const target_msg = &self.messages.items[target_idx];
+        const msg_id = target_msg.idSlice();
         const emoji = types.REACTION_EMOJIS[self.reaction_idx];
-        // Build payload: msg_id not available as string yet, use index as string
-        // For now just send the emoji name — TS side can figure out the msg
-        _ = self.events.pushTagged(.toggle_reaction, emoji);
+
+        // Build event: tag(1) + msg_id_len(1) + msg_id + emoji
+        var buf: [2 + 36 + 16]u8 = undefined;
+        buf[0] = @intFromEnum(EventTag.toggle_reaction);
+        buf[1] = @intCast(msg_id.len);
+        @memcpy(buf[2 .. 2 + msg_id.len], msg_id);
+        const emoji_len = emoji.len;
+        @memcpy(buf[2 + msg_id.len .. 2 + msg_id.len + emoji_len], emoji);
+        const total_len = 2 + msg_id.len + emoji_len;
+
+        _ = self.events.push(buf[0..total_len]);
         self.closeModal();
     }
 
@@ -827,7 +857,7 @@ pub const ChatClient = struct {
                 // Color editor — set index from current color
                 self.settings_color_idx = 0;
                 if (self.me) |me| {
-                    for (panel_render.REGISTER_COLORS, 0..) |c, i| {
+                    for (panel_render.COLOR_CHOICES, 0..) |c, i| {
                         if (colorsEqual(c, me.color)) {
                             self.settings_color_idx = @intCast(i);
                             break;
@@ -848,10 +878,30 @@ pub const ChatClient = struct {
                 self.openModal(.settings_theme);
             },
             3 => {
-                // Keybindings editor
+                // Avatar editor
+                self.settings_avatar_col = 0;
+                self.settings_avatar_draft = .{ 0, 0, 0 };
+                self.openModal(.settings_avatar);
+            },
+            4 => {
+                // Keybindings editor — copy current bindings into draft
                 self.settings_kb_idx = 0;
                 self.settings_kb_listening = false;
+                self.kb_draft = self.keybindings;
                 self.openModal(.settings_keybindings);
+            },
+            5 => {
+                // Layout editor — copy current layout into draft
+                self.layout_editor_mode = .navigate;
+                self.layout_cursor_col = 0;
+                self.layout_cursor_row = 0;
+                self.layout_panel_type_idx = 0;
+                self.layout_error_len = 0;
+                self.layout_draft_grid_cols = self.grid_cols;
+                self.layout_draft_grid_rows = self.grid_rows;
+                self.layout_draft_count = self.panel_count;
+                @memcpy(self.layout_draft_panels[0..self.panel_count], self.panels[0..self.panel_count]);
+                self.openModal(.settings_layout);
             },
             else => {},
         }
@@ -909,7 +959,7 @@ pub const ChatClient = struct {
             self.render_requested = true;
         } else if (special == .enter) {
             // Save color — convert RGBA to hex string
-            const color = panel_render.REGISTER_COLORS[self.settings_color_idx];
+            const color = panel_render.COLOR_CHOICES[self.settings_color_idx];
             // Apply locally for immediate feedback
             if (self.me) |*me| {
                 me.color = color;
@@ -952,22 +1002,364 @@ pub const ChatClient = struct {
     fn handleSettingsKeybindingsInput(self: *ChatClient, key: KeyEvent) void {
         const special = key.specialKey();
 
-        // Keybindings view is read-only for now — just shows current bindings
-        // TODO: implement rebinding (capture mode)
+        // --- Capture mode: next keypress becomes the new binding ---
+        if (self.settings_kb_listening) {
+            // Build a KeyCombo from the captured keypress
+            var combo: types.KeyCombo = .{
+                .tag = key.tag,
+                .code = key.code,
+                .ctrl = key.hasCtrl(),
+                .shift = key.hasShift(),
+            };
+            // Normalise: if it's a shifted letter codepoint, store as lowercase + shift
+            if (combo.tag == 0 and combo.code >= 'A' and combo.code <= 'Z') {
+                combo.code = combo.code + 32; // lowercase
+                combo.shift = true;
+            }
+            if (self.settings_kb_idx < types.BINDABLE_COMMAND_COUNT) {
+                self.kb_draft[self.settings_kb_idx] = combo;
+            }
+            self.settings_kb_listening = false;
+            self.dirty.markAll();
+            self.render_requested = true;
+            return;
+        }
+
+        // Escape → back to settings menu (discards draft)
         if (special == .escape) {
             self.openModal(.settings_menu);
             return;
         }
 
+        // Up/Down (or k/j) → navigate
         if (special == .up or (key.isChar() and key.charValue() == 'k')) {
-            if (self.settings_kb_idx > 0) self.settings_kb_idx -= 1;
+            if (self.settings_kb_idx > 0) {
+                self.settings_kb_idx -= 1;
+            } else {
+                self.settings_kb_idx = types.BINDABLE_COMMAND_COUNT - 1;
+            }
             self.dirty.markAll();
             self.render_requested = true;
         } else if (special == .down or (key.isChar() and key.charValue() == 'j')) {
-            self.settings_kb_idx += 1;
+            if (self.settings_kb_idx < types.BINDABLE_COMMAND_COUNT - 1) {
+                self.settings_kb_idx += 1;
+            } else {
+                self.settings_kb_idx = 0;
+            }
             self.dirty.markAll();
             self.render_requested = true;
+        } else if (special == .enter) {
+            // Enter → start listening for a new key combo
+            self.settings_kb_listening = true;
+            self.dirty.markAll();
+            self.render_requested = true;
+        } else if (key.isChar() and !key.hasCtrl()) {
+            if (key.charValue()) |ch| {
+                if (ch == 'r') {
+                    // Reset selected binding to default
+                    if (self.settings_kb_idx < types.BINDABLE_COMMAND_COUNT) {
+                        self.kb_draft[self.settings_kb_idx] = types.DEFAULT_KEYBINDINGS[self.settings_kb_idx];
+                    }
+                    self.dirty.markAll();
+                    self.render_requested = true;
+                } else if (ch == 's') {
+                    // Save keybindings — apply draft and emit to TS
+                    self.keybindings = self.kb_draft;
+                    self.emitKeybindingsUpdate();
+                    self.closeModal();
+                }
+            }
         }
+    }
+
+    fn handleSettingsLayoutInput(self: *ChatClient, key: KeyEvent) void {
+        const special = key.specialKey();
+        const gc = self.layout_draft_grid_cols;
+        const gr = self.layout_draft_grid_rows;
+
+        switch (self.layout_editor_mode) {
+            .navigate => {
+                // Escape → back to settings menu (discard draft)
+                if (special == .escape) {
+                    self.openModal(.settings_menu);
+                    return;
+                }
+
+                // Arrow keys → move cursor
+                if (special == .up) {
+                    if (self.layout_cursor_row > 0) self.layout_cursor_row -= 1;
+                } else if (special == .down) {
+                    if (self.layout_cursor_row < gr - 1) self.layout_cursor_row += 1;
+                } else if (special == .left) {
+                    if (self.layout_cursor_col > 0) self.layout_cursor_col -= 1;
+                } else if (special == .right) {
+                    if (self.layout_cursor_col < gc - 1) self.layout_cursor_col += 1;
+                }
+
+                if (key.isChar() and !key.hasCtrl()) {
+                    if (key.charValue()) |ch| {
+                        switch (ch) {
+                            'a' => {
+                                // Add panel → enter select_panel mode
+                                self.layout_editor_mode = .select_panel;
+                                self.layout_panel_type_idx = 0;
+                                self.layout_error_len = 0;
+                            },
+                            'd' => {
+                                // Delete panel under cursor
+                                if (layout_mod.cellOccupant(&self.layout_draft_panels, self.layout_draft_count, self.layout_cursor_col, self.layout_cursor_row)) |idx| {
+                                    self.removeLayoutDraftPanel(idx);
+                                    self.layout_error_len = 0;
+                                }
+                            },
+                            'r' => {
+                                // Reset to default layout
+                                self.layout_draft_count = layout_mod.initDefaultLayout(&self.layout_draft_panels);
+                                self.layout_draft_grid_cols = layout_mod.DEFAULT_GRID_COLS;
+                                self.layout_draft_grid_rows = layout_mod.DEFAULT_GRID_ROWS;
+                                self.layout_cursor_col = 0;
+                                self.layout_cursor_row = 0;
+                                self.layout_error_len = 0;
+                            },
+                            's' => {
+                                // Save — validate then apply
+                                if (!layout_mod.validateLayout(&self.layout_draft_panels, self.layout_draft_count)) {
+                                    self.setLayoutError("Need messages + compose");
+                                } else {
+                                    // Apply draft to live layout
+                                    self.panel_count = self.layout_draft_count;
+                                    @memcpy(self.panels[0..self.panel_count], self.layout_draft_panels[0..self.layout_draft_count]);
+                                    self.grid_cols = self.layout_draft_grid_cols;
+                                    self.grid_rows = self.layout_draft_grid_rows;
+                                    self.dirty.layout = true;
+                                    // Fix focus if it's out of range
+                                    if (self.focus_idx >= self.panel_count) {
+                                        self.focus_idx = self.findPanelByKind(.compose) orelse 0;
+                                    }
+                                    self.emitLayoutUpdate();
+                                    self.closeModal();
+                                }
+                            },
+                            '[' => {
+                                // Decrease grid cols
+                                if (self.layout_draft_grid_cols > layout_mod.MIN_GRID) {
+                                    self.layout_draft_grid_cols -= 1;
+                                    self.clampLayoutCursor();
+                                }
+                            },
+                            ']' => {
+                                // Increase grid cols
+                                if (self.layout_draft_grid_cols < layout_mod.MAX_GRID) {
+                                    self.layout_draft_grid_cols += 1;
+                                }
+                            },
+                            '-' => {
+                                // Decrease grid rows
+                                if (self.layout_draft_grid_rows > layout_mod.MIN_GRID) {
+                                    self.layout_draft_grid_rows -= 1;
+                                    self.clampLayoutCursor();
+                                }
+                            },
+                            '=' => {
+                                // Increase grid rows
+                                if (self.layout_draft_grid_rows < layout_mod.MAX_GRID) {
+                                    self.layout_draft_grid_rows += 1;
+                                }
+                            },
+                            else => {},
+                        }
+                    }
+                }
+
+                self.dirty.markAll();
+                self.render_requested = true;
+            },
+
+            .select_panel => {
+                // Escape → back to navigate
+                if (special == .escape) {
+                    self.layout_editor_mode = .navigate;
+                    self.dirty.markAll();
+                    self.render_requested = true;
+                    return;
+                }
+
+                // Up/Down → cycle panel type
+                if (special == .up) {
+                    if (self.layout_panel_type_idx > 0) {
+                        self.layout_panel_type_idx -= 1;
+                    } else {
+                        self.layout_panel_type_idx = types.PANEL_TYPE_COUNT - 1;
+                    }
+                } else if (special == .down) {
+                    if (self.layout_panel_type_idx < types.PANEL_TYPE_COUNT - 1) {
+                        self.layout_panel_type_idx += 1;
+                    } else {
+                        self.layout_panel_type_idx = 0;
+                    }
+                } else if (special == .enter) {
+                    // Confirm selection → move to place mode, anchor at cursor
+                    self.layout_anchor_col = self.layout_cursor_col;
+                    self.layout_anchor_row = self.layout_cursor_row;
+                    self.layout_editor_mode = .place;
+                }
+
+                self.dirty.markAll();
+                self.render_requested = true;
+            },
+
+            .place => {
+                // Escape → back to navigate
+                if (special == .escape) {
+                    self.layout_editor_mode = .navigate;
+                    self.dirty.markAll();
+                    self.render_requested = true;
+                    return;
+                }
+
+                // Arrow keys → extend selection rectangle
+                if (special == .up) {
+                    if (self.layout_cursor_row > 0) self.layout_cursor_row -= 1;
+                } else if (special == .down) {
+                    if (self.layout_cursor_row < gr - 1) self.layout_cursor_row += 1;
+                } else if (special == .left) {
+                    if (self.layout_cursor_col > 0) self.layout_cursor_col -= 1;
+                } else if (special == .right) {
+                    if (self.layout_cursor_col < gc - 1) self.layout_cursor_col += 1;
+                } else if (special == .enter) {
+                    // Place panel in the selected rectangle
+                    const min_col = @min(self.layout_anchor_col, self.layout_cursor_col);
+                    const max_col = @max(self.layout_anchor_col, self.layout_cursor_col);
+                    const min_row = @min(self.layout_anchor_row, self.layout_cursor_row);
+                    const max_row = @max(self.layout_anchor_row, self.layout_cursor_row);
+                    const cs = max_col - min_col + 1;
+                    const rs = max_row - min_row + 1;
+
+                    // Check for overlap
+                    if (layout_mod.hasOverlap(&self.layout_draft_panels, self.layout_draft_count, min_col, min_row, cs, rs)) {
+                        self.setLayoutError("Overlaps existing panel");
+                    } else if (self.layout_draft_count >= types.MAX_PANELS) {
+                        self.setLayoutError("Max panels reached");
+                    } else {
+                        // Place the panel
+                        const kind: types.PanelKind = @enumFromInt(self.layout_panel_type_idx);
+                        self.layout_draft_panels[self.layout_draft_count] = .{
+                            .kind = kind,
+                            .col = min_col,
+                            .row = min_row,
+                            .col_span = cs,
+                            .row_span = rs,
+                            .group = 0,
+                        };
+                        self.layout_draft_count += 1;
+                        self.layout_error_len = 0;
+                        self.layout_editor_mode = .navigate;
+                    }
+                }
+
+                self.dirty.markAll();
+                self.render_requested = true;
+            },
+        }
+    }
+
+    fn removeLayoutDraftPanel(self: *ChatClient, idx: u8) void {
+        if (idx >= self.layout_draft_count) return;
+        // Shift remaining panels down
+        const count = self.layout_draft_count;
+        var i: u8 = idx;
+        while (i + 1 < count) : (i += 1) {
+            self.layout_draft_panels[i] = self.layout_draft_panels[i + 1];
+        }
+        self.layout_draft_count -= 1;
+    }
+
+    fn setLayoutError(self: *ChatClient, msg: []const u8) void {
+        const len = @min(msg.len, self.layout_error.len);
+        @memcpy(self.layout_error[0..len], msg[0..len]);
+        self.layout_error_len = @intCast(len);
+    }
+
+    fn clampLayoutCursor(self: *ChatClient) void {
+        if (self.layout_cursor_col >= self.layout_draft_grid_cols) {
+            self.layout_cursor_col = self.layout_draft_grid_cols - 1;
+        }
+        if (self.layout_cursor_row >= self.layout_draft_grid_rows) {
+            self.layout_cursor_row = self.layout_draft_grid_rows - 1;
+        }
+    }
+
+    /// Emit the current layout as a JSON string via update_profile event.
+    fn emitLayoutUpdate(self: *ChatClient) void {
+        var json_buf: [4096]u8 = undefined;
+        var pos: usize = 0;
+
+        // {"gridCols":N,"gridRows":N,"panels":[...]}
+        const prefix = "{\"gridCols\":";
+        @memcpy(json_buf[pos .. pos + prefix.len], prefix);
+        pos += prefix.len;
+        pos += writeU16(json_buf[pos..], self.grid_cols);
+
+        const mid1 = ",\"gridRows\":";
+        @memcpy(json_buf[pos .. pos + mid1.len], mid1);
+        pos += mid1.len;
+        pos += writeU16(json_buf[pos..], self.grid_rows);
+
+        const mid2 = ",\"panels\":[";
+        @memcpy(json_buf[pos .. pos + mid2.len], mid2);
+        pos += mid2.len;
+
+        for (self.panels[0..self.panel_count], 0..) |*p, i| {
+            if (i > 0) {
+                json_buf[pos] = ',';
+                pos += 1;
+            }
+            pos += self.formatPanelJson(p, json_buf[pos..]);
+        }
+
+        json_buf[pos] = ']';
+        pos += 1;
+        json_buf[pos] = '}';
+        pos += 1;
+
+        _ = self.events.pushUpdateProfile("layout", json_buf[0..pos]);
+    }
+
+    fn formatPanelJson(_: *const ChatClient, p: *const Panel, out: []u8) usize {
+        var pos: usize = 0;
+        // {"type":"kind","col":N,"row":N,"colSpan":N,"rowSpan":N}
+        const kind_names = [_][]const u8{ "header", "messages", "compose", "channels", "members" };
+        const kind_name = kind_names[@intFromEnum(p.kind)];
+
+        const t1 = "{\"type\":\"";
+        @memcpy(out[pos .. pos + t1.len], t1);
+        pos += t1.len;
+        @memcpy(out[pos .. pos + kind_name.len], kind_name);
+        pos += kind_name.len;
+
+        const t2 = "\",\"col\":";
+        @memcpy(out[pos .. pos + t2.len], t2);
+        pos += t2.len;
+        pos += writeU16(out[pos..], p.col);
+
+        const t3 = ",\"row\":";
+        @memcpy(out[pos .. pos + t3.len], t3);
+        pos += t3.len;
+        pos += writeU16(out[pos..], p.row);
+
+        const t4 = ",\"colSpan\":";
+        @memcpy(out[pos .. pos + t4.len], t4);
+        pos += t4.len;
+        pos += writeU16(out[pos..], p.col_span);
+
+        const t5 = ",\"rowSpan\":";
+        @memcpy(out[pos .. pos + t5.len], t5);
+        pos += t5.len;
+        pos += writeU16(out[pos..], p.row_span);
+
+        out[pos] = '}';
+        pos += 1;
+        return pos;
     }
 
     fn handleSettingsAvatarInput(self: *ChatClient, key: KeyEvent) void {
@@ -975,6 +1367,21 @@ pub const ChatClient = struct {
 
         if (special == .escape) {
             self.openModal(.settings_menu);
+            return;
+        }
+
+        if (special == .enter) {
+            // Save avatar pattern — encode 3 glyph indices as UTF-8 string
+            var pattern_buf: [12]u8 = undefined; // max 3 glyphs × 3 bytes each
+            var pattern_len: usize = 0;
+            for (0..3) |col| {
+                const glyph_idx = self.settings_avatar_draft[col] % types.AVATAR_GLYPH_COUNT;
+                const glyph = types.AVATAR_GLYPHS[glyph_idx];
+                @memcpy(pattern_buf[pattern_len .. pattern_len + glyph.len], glyph);
+                pattern_len += glyph.len;
+            }
+            _ = self.events.pushUpdateProfile("avatarPattern", pattern_buf[0..pattern_len]);
+            self.closeModal();
             return;
         }
 
@@ -991,11 +1398,17 @@ pub const ChatClient = struct {
             // Cycle glyph at current column
             if (self.settings_avatar_draft[self.settings_avatar_col] > 0) {
                 self.settings_avatar_draft[self.settings_avatar_col] -= 1;
+            } else {
+                self.settings_avatar_draft[self.settings_avatar_col] = types.AVATAR_GLYPH_COUNT - 1;
             }
             self.dirty.markAll();
             self.render_requested = true;
         } else if (special == .down or (key.isChar() and key.charValue() == 'j')) {
-            self.settings_avatar_draft[self.settings_avatar_col] +|= 1;
+            if (self.settings_avatar_draft[self.settings_avatar_col] < types.AVATAR_GLYPH_COUNT - 1) {
+                self.settings_avatar_draft[self.settings_avatar_col] += 1;
+            } else {
+                self.settings_avatar_draft[self.settings_avatar_col] = 0;
+            }
             self.dirty.markAll();
             self.render_requested = true;
         }
@@ -1046,9 +1459,48 @@ pub const ChatClient = struct {
     fn handleComposeInput(self: *ChatClient, key: KeyEvent) void {
         const special = key.specialKey();
 
-        // Enter (without Shift) → send message
-        if (special == .enter and !key.hasShift()) {
+        // --- Slash autocomplete navigation (intercepts keys when open) ---
+        if (self.slash_ac_open and self.slash_ac_filtered_count > 0) {
+            const count = self.slash_ac_filtered_count;
+
+            if (special == .escape) {
+                self.slash_ac_open = false;
+                self.slash_ac_idx = 0;
+                self.slash_ac_filtered_count = 0;
+                self.dirty.compose = true;
+                self.render_requested = true;
+                return;
+            }
+
+            if (special == .up) {
+                self.slash_ac_idx = if (self.slash_ac_idx == 0) count - 1 else self.slash_ac_idx - 1;
+                self.dirty.compose = true;
+                self.render_requested = true;
+                return;
+            }
+
+            if (special == .down) {
+                self.slash_ac_idx = (self.slash_ac_idx + 1) % count;
+                self.dirty.compose = true;
+                self.render_requested = true;
+                return;
+            }
+
+            if (special == .tab or (special == .enter and !key.hasShift() and !key.hasCtrl())) {
+                const cmd_idx = self.slash_ac_filtered[self.slash_ac_idx];
+                self.executeSlashCommand(cmd_idx);
+                return;
+            }
+        }
+
+        // Enter (without Shift or Ctrl) → send message
+        if (special == .enter and !key.hasShift() and !key.hasCtrl()) {
             self.sendCurrentMessage();
+            // Emit typing_stop when message is sent
+            if (self.compose_is_typing) {
+                self.compose_is_typing = false;
+                _ = self.events.pushTagged(.typing_stop, "");
+            }
             return;
         }
 
@@ -1057,6 +1509,15 @@ pub const ChatClient = struct {
             self.handleEditorInput(eb, key);
             self.dirty.compose = true;
             self.render_requested = true;
+
+            // Update slash autocomplete filter after text change
+            self.updateSlashFilter();
+
+            // Emit typing_start on first keypress in compose
+            if (!self.compose_is_typing) {
+                self.compose_is_typing = true;
+                _ = self.events.pushTagged(.typing_start, "");
+            }
         }
     }
 
@@ -1073,11 +1534,12 @@ pub const ChatClient = struct {
             self.channel_sel_idx = @mod(self.channel_sel_idx + 1, channel_count);
             self.dirty.channels = true;
             self.render_requested = true;
-        } else if (special == .enter) {
+         } else if (special == .enter) {
             // Switch to selected channel
             const idx: usize = @intCast(self.channel_sel_idx);
             if (idx < self.channels.items.len) {
                 const chan = &self.channels.items[idx];
+                chan.unread_count = 0; // clear unread badge
                 const name = chan.nameSlice();
                 @memcpy(self.current_channel[0..name.len], name);
                 self.current_channel_len = @intCast(name.len);
@@ -1145,6 +1607,10 @@ pub const ChatClient = struct {
         if (msg_count == 0) return;
         const max_offset = self.maxScrollOffset();
         self.msg_scroll_offset = @max(0, @min(max_offset, self.msg_scroll_offset + delta));
+        // Clear unread divider when user scrolls back to the bottom
+        if (self.msg_scroll_offset == 0) {
+            self.unread_divider_idx = -1;
+        }
         self.dirty.messages = true;
         self.render_requested = true;
     }
@@ -1169,11 +1635,17 @@ pub const ChatClient = struct {
         return 0;
     }
 
+    /// Number of extra columns used by avatar display (3 glyphs + 1 space, or 0 if disabled).
+    pub fn avatarCols(self: *const ChatClient) usize {
+        return if (self.show_avatars) 4 else 0;
+    }
+
     /// Total display rows across all messages (accounts for word wrap).
     fn totalMessageRows(self: *const ChatClient, available_width: usize) usize {
+        const acols = self.avatarCols();
         var total: usize = 0;
         for (self.messages.items) |*msg| {
-            total += types.msgRowCount(msg, available_width);
+            total += types.msgRowCountWithAvatar(msg, available_width, acols);
         }
         return total;
     }
@@ -1188,6 +1660,7 @@ pub const ChatClient = struct {
         const visible_rows = self.messagesVisibleRows();
         if (visible_rows == 0) return;
         const available_width: usize = @intCast(if (self.findPanelByKind(.messages)) |idx| self.panels[idx].innerWidth() else return);
+        const acols = self.avatarCols();
 
         // Calculate the row range of the selected message (from bottom)
         // Row 0 = bottom-most row of the last message
@@ -1195,10 +1668,10 @@ pub const ChatClient = struct {
         var i: usize = msgs.len;
         while (i > sel) {
             i -= 1;
-            rows_from_bottom += types.msgRowCount(&msgs[i], available_width);
+            rows_from_bottom += types.msgRowCountWithAvatar(&msgs[i], available_width, acols);
         }
         // rows_from_bottom now points to the TOP of the selected message
-        const sel_rows = types.msgRowCount(&msgs[sel], available_width);
+        const sel_rows = types.msgRowCountWithAvatar(&msgs[sel], available_width, acols);
         // The selected message occupies rows [rows_from_bottom - sel_rows + 1 .. rows_from_bottom] from bottom
         // But we computed by summing messages BELOW sel, so rows_from_bottom = total rows below sel (exclusive)
         // Actually: rows_from_bottom = sum of rows for msgs[sel+1..len]
@@ -1253,10 +1726,13 @@ pub const ChatClient = struct {
                     eb.setCursor(eol.row, eol.col) catch {};
                 },
                 .enter => {
-                    // Shift+Enter or in contexts that allow newlines
-                    if (key.hasShift()) {
+                    // Ctrl+Enter or Shift+Enter → insert newline
+                    if (key.hasCtrl() or key.hasShift()) {
                         eb.insertText("\n") catch {};
                     }
+                },
+                .space => {
+                    eb.insertText(" ") catch {};
                 },
                 else => {},
             }
@@ -1264,9 +1740,14 @@ pub const ChatClient = struct {
             // Regular character input
             if (key.charValue()) |codepoint| {
                 if (key.hasCtrl()) return; // don't insert ctrl+letter as text
+                // Shift+letter → uppercase (parseKeypress lowercases shifted letters)
+                const actual = if (key.hasShift() and codepoint >= 'a' and codepoint <= 'z')
+                    codepoint - 32
+                else
+                    codepoint;
                 // Encode codepoint to UTF-8 and insert
                 var buf: [4]u8 = undefined;
-                const len = std.unicode.utf8Encode(codepoint, &buf) catch return;
+                const len = std.unicode.utf8Encode(actual, &buf) catch return;
                 eb.insertText(buf[0..len]) catch {};
             }
         }
@@ -1428,11 +1909,14 @@ pub const ChatClient = struct {
         // will clear any region we skip.
         switch (self.screen) {
             .loading => panel_render.renderLoadingScreen(self, buf),
-            .register => panel_render.renderRegisterScreen(self, buf),
             .chat => {
                 for (self.panels[0..self.panel_count]) |*p| {
                     if (!p.visible) continue;
                     panel_render.renderPanel(self, p, buf);
+                }
+                // Render slash autocomplete popup above compose panel
+                if (self.slash_ac_open and self.slash_ac_filtered_count > 0) {
+                    panel_render.renderSlashAutocomplete(self, buf);
                 }
                 // Render modal overlay on top
                 if (self.modal != .none) {
@@ -1486,4 +1970,485 @@ pub const ChatClient = struct {
             @abs(a[1] - b[1]) < 0.01 and
             @abs(a[2] - b[2]) < 0.01;
     }
+
+    // ---------------------------------------------------------------
+    // Slash command autocomplete
+    // ---------------------------------------------------------------
+
+    /// Simple fuzzy match: every character in query appears in order in target.
+    fn fuzzyMatch(query: []const u8, target: []const u8) bool {
+        var qi: usize = 0;
+        for (target) |tc| {
+            if (qi >= query.len) break;
+            // Case-insensitive compare
+            const qc = if (query[qi] >= 'A' and query[qi] <= 'Z') query[qi] + 32 else query[qi];
+            const tl = if (tc >= 'A' and tc <= 'Z') tc + 32 else tc;
+            if (qc == tl) qi += 1;
+        }
+        return qi >= query.len;
+    }
+
+    /// Re-filter the slash command list based on current compose text.
+    fn updateSlashFilter(self: *ChatClient) void {
+        self.slash_ac_filtered_count = 0;
+        if (self.compose_edit_buffer == null) return;
+        const eb = self.compose_edit_buffer.?;
+        const len = eb.getText(&_get_text_buf);
+        if (len == 0 or _get_text_buf[0] != '/') {
+            self.slash_ac_open = false;
+            return;
+        }
+        // Check for space — close autocomplete if user typed a space (entering args)
+        for (_get_text_buf[1..len]) |c| {
+            if (c == ' ') {
+                self.slash_ac_open = false;
+                return;
+            }
+        }
+        const query = _get_text_buf[1..len]; // text after '/'
+        for (types.SLASH_COMMANDS, 0..) |cmd, i| {
+            if (query.len == 0 or fuzzyMatch(query, cmd.name)) {
+                if (self.slash_ac_filtered_count < types.SLASH_COMMAND_COUNT) {
+                    self.slash_ac_filtered[self.slash_ac_filtered_count] = @intCast(i);
+                    self.slash_ac_filtered_count += 1;
+                }
+            }
+        }
+        if (self.slash_ac_filtered_count == 0) {
+            self.slash_ac_open = false;
+        } else {
+            self.slash_ac_open = true;
+            // Clamp selection index
+            if (self.slash_ac_idx >= self.slash_ac_filtered_count) {
+                self.slash_ac_idx = self.slash_ac_filtered_count - 1;
+            }
+        }
+    }
+
+    /// Execute the selected slash command (replace compose text with /command and optionally send).
+    fn executeSlashCommand(self: *ChatClient, cmd_idx: usize) void {
+        if (cmd_idx >= types.SLASH_COMMAND_COUNT) return;
+        const cmd = &types.SLASH_COMMANDS[cmd_idx];
+
+        // Close autocomplete
+        self.slash_ac_open = false;
+        self.slash_ac_idx = 0;
+        self.slash_ac_filtered_count = 0;
+
+        // Handle commands that map directly to Zig UI actions
+        if (std.mem.eql(u8, cmd.name, "help")) {
+            self.modal = .help;
+            self.dirty.markAll();
+            self.render_requested = true;
+            self.clearCompose();
+            return;
+        }
+        if (std.mem.eql(u8, cmd.name, "quit")) {
+            self.clearCompose();
+            _ = self.events.pushTagged(.quit, "");
+            return;
+        }
+        if (std.mem.eql(u8, cmd.name, "nick")) {
+            self.modal = .settings_name;
+            self.dirty.markAll();
+            self.render_requested = true;
+            self.clearCompose();
+            return;
+        }
+        if (std.mem.eql(u8, cmd.name, "settings")) {
+            self.modal = .settings_menu;
+            self.dirty.markAll();
+            self.render_requested = true;
+            self.clearCompose();
+            return;
+        }
+        if (std.mem.eql(u8, cmd.name, "theme")) {
+            self.modal = .settings_theme;
+            self.dirty.markAll();
+            self.render_requested = true;
+            self.clearCompose();
+            return;
+        }
+        if (std.mem.eql(u8, cmd.name, "dm")) {
+            self.modal = .users;
+            self.dirty.markAll();
+            self.render_requested = true;
+            self.clearCompose();
+            return;
+        }
+        if (std.mem.eql(u8, cmd.name, "react")) {
+            self.modal = .reaction;
+            self.dirty.markAll();
+            self.render_requested = true;
+            self.clearCompose();
+            return;
+        }
+        if (std.mem.eql(u8, cmd.name, "leavedm")) {
+            self.clearCompose();
+            _ = self.events.pushTagged(.leave_dm, "");
+            return;
+        }
+
+        // Commands with args: replace compose text with "/command " and let user type args
+        if (cmd.has_args) {
+            if (self.compose_edit_buffer) |eb| {
+                eb.clear() catch {};
+                // Build "/command " and insert as text
+                var cmd_buf: [64]u8 = undefined;
+                var pos: usize = 0;
+                cmd_buf[pos] = '/';
+                pos += 1;
+                const nlen = @min(cmd.name.len, cmd_buf.len - pos - 1);
+                @memcpy(cmd_buf[pos .. pos + nlen], cmd.name[0..nlen]);
+                pos += nlen;
+                cmd_buf[pos] = ' ';
+                pos += 1;
+                eb.insertText(cmd_buf[0..pos]) catch {};
+                self.dirty.compose = true;
+                self.render_requested = true;
+            }
+            return;
+        }
+    }
+
+    /// Emit the current keybindings as a JSON string via update_profile event.
+    /// Format: {"quit":{"key":"escape"},"quitImmediate":{"key":"q","ctrl":true},...}
+    fn emitKeybindingsUpdate(self: *ChatClient) void {
+        // Map BindableCommand enum indices to JSON key names
+        const CMD_NAMES = [types.BINDABLE_COMMAND_COUNT][]const u8{
+            "quit",
+            "quitImmediate",
+            "toggleHelp",
+            "openSettings",
+            "toggleTimestamps",
+            "toggleAvatars",
+            "toggleUsers",
+            "newDm",
+            "leaveDm",
+            "addDmMember",
+            "prevChannel",
+            "nextChannel",
+            "react",
+        };
+        // Build JSON string into a buffer
+        var json_buf: [2048]u8 = undefined;
+        var pos: usize = 0;
+        json_buf[pos] = '{';
+        pos += 1;
+
+        for (0..types.BINDABLE_COMMAND_COUNT) |i| {
+            if (i > 0) {
+                json_buf[pos] = ',';
+                pos += 1;
+            }
+            // "cmdName":{"key":"keyname"[,"ctrl":true][,"shift":true]}
+            json_buf[pos] = '"';
+            pos += 1;
+            @memcpy(json_buf[pos .. pos + CMD_NAMES[i].len], CMD_NAMES[i]);
+            pos += CMD_NAMES[i].len;
+            json_buf[pos] = '"';
+            pos += 1;
+            json_buf[pos] = ':';
+            pos += 1;
+
+            const combo = self.keybindings[i];
+            pos += self.formatComboJson(combo, json_buf[pos..]);
+        }
+
+        json_buf[pos] = '}';
+        pos += 1;
+
+        _ = self.events.pushUpdateProfile("keybindings", json_buf[0..pos]);
+    }
+
+    /// Format a single KeyCombo as a JSON object fragment: {"key":"name"[,"ctrl":true][,"shift":true]}
+    fn formatComboJson(_: *const ChatClient, combo: types.KeyCombo, out: []u8) usize {
+        var pos: usize = 0;
+
+        // Opening brace
+        out[pos] = '{';
+        pos += 1;
+
+        // "key":"name"
+        const key_prefix = "\"key\":\"";
+        @memcpy(out[pos .. pos + key_prefix.len], key_prefix);
+        pos += key_prefix.len;
+
+        if (combo.tag == 0) {
+            // Character key — write as lowercase letter name
+            const c: u8 = @intCast(combo.code & 0x7F);
+            const lower = if (c >= 'A' and c <= 'Z') c + 32 else c;
+            out[pos] = lower;
+            pos += 1;
+        } else {
+            // Special key — write the key name
+            const name = comboSpecialKeyJsonName(combo.code);
+            @memcpy(out[pos .. pos + name.len], name);
+            pos += name.len;
+        }
+
+        out[pos] = '"';
+        pos += 1;
+
+        if (combo.ctrl) {
+            const frag = ",\"ctrl\":true";
+            @memcpy(out[pos .. pos + frag.len], frag);
+            pos += frag.len;
+        }
+
+        if (combo.shift) {
+            const frag = ",\"shift\":true";
+            @memcpy(out[pos .. pos + frag.len], frag);
+            pos += frag.len;
+        }
+
+        out[pos] = '}';
+        pos += 1;
+
+        return pos;
+    }
+
+    /// Set a single keybinding (called from TS when loading saved bindings).
+    /// Set layout from a JSON string (called from TS via FFI).
+    /// JSON format: {"gridCols":N,"gridRows":N,"panels":[{"type":"kind","col":N,"row":N,"colSpan":N,"rowSpan":N},...]}
+    pub fn setLayout(self: *ChatClient, json: []const u8) void {
+        // Parse gridCols
+        const gc_key = "\"gridCols\":";
+        const gc_idx = indexOf(json, gc_key) orelse return;
+        const gc_start = gc_idx + gc_key.len;
+        const gc_val = parseJsonU16(json[gc_start..]) orelse return;
+
+        // Parse gridRows
+        const gr_key = "\"gridRows\":";
+        const gr_idx = indexOf(json, gr_key) orelse return;
+        const gr_start = gr_idx + gr_key.len;
+        const gr_val = parseJsonU16(json[gr_start..]) orelse return;
+
+        // Validate grid bounds
+        if (gc_val < layout_mod.MIN_GRID or gc_val > layout_mod.MAX_GRID) return;
+        if (gr_val < layout_mod.MIN_GRID or gr_val > layout_mod.MAX_GRID) return;
+
+        // Parse panels array
+        const arr_start_idx = indexOf(json, "[") orelse return;
+        const arr_end_idx = lastIndexOf(json, "]") orelse return;
+        if (arr_end_idx <= arr_start_idx) return;
+        const arr_content = json[arr_start_idx + 1 .. arr_end_idx];
+
+        var new_panels: [types.MAX_PANELS]Panel = undefined;
+        var count: u8 = 0;
+
+        // Split on },{  — each panel object
+        var rest = arr_content;
+        while (rest.len > 0 and count < types.MAX_PANELS) {
+            // Find start of object
+            const obj_start = indexOf(rest, "{") orelse break;
+            const obj_end = indexOf(rest[obj_start..], "}") orelse break;
+            const obj = rest[obj_start .. obj_start + obj_end + 1];
+
+            if (parsePanelJson(obj)) |panel| {
+                new_panels[count] = panel;
+                count += 1;
+            }
+
+            rest = rest[obj_start + obj_end + 1 ..];
+        }
+
+        if (count == 0) return;
+
+        // Apply
+        self.grid_cols = gc_val;
+        self.grid_rows = gr_val;
+        self.panel_count = count;
+        for (0..count) |i| {
+            self.panels[i] = new_panels[i];
+        }
+
+        // Recompute pixel layout
+        layout_mod.computeLayout(self.panels[0..self.panel_count], self.width, self.height, self.grid_cols, self.grid_rows);
+        self.dirty.markAll();
+        self.render_requested = true;
+    }
+
+    pub fn setKeybinding(self: *ChatClient, cmd_idx: u8, tag: u8, code: u32, modifiers: u8) void {
+        if (cmd_idx >= types.BINDABLE_COMMAND_COUNT) return;
+        self.keybindings[cmd_idx] = .{
+            .tag = tag,
+            .code = code,
+            .ctrl = (modifiers & 1) != 0,
+            .shift = (modifiers & 2) != 0,
+        };
+    }
+
+    /// Check if a key event matches a bindable command's current keybinding.
+    fn matchesBinding(self: *const ChatClient, key: KeyEvent, cmd: types.BindableCommand) bool {
+        const combo = self.keybindings[@intFromEnum(cmd)];
+        if (combo.tag == 0) {
+            // Character binding
+            if (!key.isChar()) return false;
+            const ch = key.charValue() orelse return false;
+            if (@as(u32, ch) != combo.code) return false;
+            if (combo.ctrl != key.hasCtrl()) return false;
+            if (combo.shift != key.hasShift()) return false;
+            return true;
+        } else {
+            // Special key binding
+            if (!key.isSpecial()) return false;
+            const sp = key.specialKey() orelse return false;
+            if (@as(u32, @intFromEnum(sp)) != combo.code) return false;
+            if (combo.ctrl != key.hasCtrl()) return false;
+            if (combo.shift != key.hasShift()) return false;
+            return true;
+        }
+    }
+
+    fn clearCompose(self: *ChatClient) void {
+        if (self.compose_edit_buffer) |eb| {
+            eb.clear() catch {};
+            self.dirty.compose = true;
+            self.render_requested = true;
+        }
+    }
 };
+
+/// Write a u16 value as decimal ASCII into buf, returning the number of bytes written.
+fn writeU16(buf: []u8, value: u16) usize {
+    if (value == 0) {
+        buf[0] = '0';
+        return 1;
+    }
+    var v = value;
+    var digits: [5]u8 = undefined; // u16 max is 65535 (5 digits)
+    var len: usize = 0;
+    while (v > 0) {
+        digits[len] = @intCast(v % 10 + '0');
+        v /= 10;
+        len += 1;
+    }
+    // Reverse into output buffer
+    for (0..len) |i| {
+        buf[i] = digits[len - 1 - i];
+    }
+    return len;
+}
+
+/// Map SpecialKey code to its JSON key name (matches keybindings.ts key names).
+fn comboSpecialKeyJsonName(code: u32) []const u8 {
+    return switch (code) {
+        1 => "return",
+        2 => "tab",
+        3 => "escape",
+        4 => "backspace",
+        5 => "delete",
+        6 => "up",
+        7 => "down",
+        8 => "left",
+        9 => "right",
+        10 => "home",
+        11 => "end",
+        12 => "pageup",
+        13 => "pagedown",
+        14 => "f1",
+        15 => "f2",
+        16 => "f3",
+        17 => "f4",
+        18 => "f5",
+        19 => "f6",
+        20 => "f7",
+        21 => "f8",
+        22 => "f9",
+        23 => "f10",
+        24 => "f11",
+        25 => "f12",
+        26 => "insert",
+        27 => "space",
+        else => "unknown",
+    };
+}
+
+/// Find first occurrence of needle in haystack, return index or null.
+fn indexOf(haystack: []const u8, needle: []const u8) ?usize {
+    if (needle.len > haystack.len) return null;
+    if (needle.len == 0) return 0;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.mem.eql(u8, haystack[i .. i + needle.len], needle)) return i;
+    }
+    return null;
+}
+
+/// Find last occurrence of needle in haystack, return index or null.
+fn lastIndexOf(haystack: []const u8, needle: []const u8) ?usize {
+    if (needle.len > haystack.len) return null;
+    var result: ?usize = null;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.mem.eql(u8, haystack[i .. i + needle.len], needle)) result = i;
+    }
+    return result;
+}
+
+/// Parse a u16 from decimal digits at the start of the slice.
+fn parseJsonU16(s: []const u8) ?u16 {
+    var val: u16 = 0;
+    var count: usize = 0;
+    for (s) |c| {
+        if (c >= '0' and c <= '9') {
+            val = val *% 10 +% @as(u16, c - '0');
+            count += 1;
+        } else break;
+    }
+    if (count == 0) return null;
+    return val;
+}
+
+/// Parse a panel object JSON like {"type":"header","col":0,"row":0,"colSpan":10,"rowSpan":1}
+fn parsePanelJson(obj: []const u8) ?types.Panel {
+    // Parse type
+    const type_key = "\"type\":\"";
+    const type_idx = indexOf(obj, type_key) orelse return null;
+    const type_start = type_idx + type_key.len;
+    const type_end_idx = indexOf(obj[type_start..], "\"") orelse return null;
+    const type_str = obj[type_start .. type_start + type_end_idx];
+
+    const kind: types.PanelKind = if (std.mem.eql(u8, type_str, "header"))
+        .header
+    else if (std.mem.eql(u8, type_str, "messages"))
+        .messages
+    else if (std.mem.eql(u8, type_str, "compose"))
+        .compose
+    else if (std.mem.eql(u8, type_str, "channels"))
+        .channels
+    else if (std.mem.eql(u8, type_str, "members"))
+        .members
+    else
+        return null;
+
+    // Parse col
+    const col_key = "\"col\":";
+    const col_idx = indexOf(obj, col_key) orelse return null;
+    const col_val = parseJsonU16(obj[col_idx + col_key.len ..]) orelse return null;
+
+    // Parse row
+    const row_key = "\"row\":";
+    const row_idx = indexOf(obj, row_key) orelse return null;
+    const row_val = parseJsonU16(obj[row_idx + row_key.len ..]) orelse return null;
+
+    // Parse colSpan
+    const cs_key = "\"colSpan\":";
+    const cs_idx = indexOf(obj, cs_key) orelse return null;
+    const cs_val = parseJsonU16(obj[cs_idx + cs_key.len ..]) orelse return null;
+
+    // Parse rowSpan
+    const rs_key = "\"rowSpan\":";
+    const rs_idx = indexOf(obj, rs_key) orelse return null;
+    const rs_val = parseJsonU16(obj[rs_idx + rs_key.len ..]) orelse return null;
+
+    return .{
+        .kind = kind,
+        .col = col_val,
+        .row = row_val,
+        .col_span = cs_val,
+        .row_span = rs_val,
+        .group = 0,
+    };
+}

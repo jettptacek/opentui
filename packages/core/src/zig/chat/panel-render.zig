@@ -25,8 +25,8 @@ const ROUNDED_BORDER = [8]u32{
 const ADMIN_BADGE_COLOR: RGBA = .{ 1.0, 107.0 / 255.0, 107.0 / 255.0, 1.0 }; // #ff6b6b
 const MOD_BADGE_COLOR: RGBA = .{ 229.0 / 255.0, 192.0 / 255.0, 123.0 / 255.0, 1.0 }; // #e5c07b
 
-// Registration color choices (matches the 8 colors from the SolidJS RegisterScreen)
-pub const REGISTER_COLORS = [8]RGBA{
+// Color choices for user profile (used in settings color picker)
+pub const COLOR_CHOICES = [8]RGBA{
     .{ 97.0 / 255.0, 175.0 / 255.0, 239.0 / 255.0, 1.0 }, // #61afef blue
     .{ 152.0 / 255.0, 195.0 / 255.0, 121.0 / 255.0, 1.0 }, // #98c379 green
     .{ 198.0 / 255.0, 120.0 / 255.0, 221.0 / 255.0, 1.0 }, // #c678dd purple
@@ -36,6 +36,82 @@ pub const REGISTER_COLORS = [8]RGBA{
     .{ 209.0 / 255.0, 154.0 / 255.0, 102.0 / 255.0, 1.0 }, // #d19a66 orange
     .{ 255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0, 1.0 }, // #ffffff white
 };
+
+/// Check if a byte is a word boundary for @mention detection
+fn isMentionBoundary(c: u8) bool {
+    return c == ' ' or c == ',' or c == '.' or c == '!' or c == '?' or
+        c == ':' or c == ';' or c == '\'' or c == '"' or c == ')' or
+        c == ']' or c == '}' or c == '\n' or c == '\r' or c == '\t';
+}
+
+/// Find a user by name and return a pointer to their User struct, or null.
+fn findUserByName(name: []const u8, client: *const ChatClient) ?*const types.User {
+    if (client.me) |*me| {
+        if (std.mem.eql(u8, name, me.nameSlice())) return me;
+    }
+    for (client.users.items) |*u| {
+        if (std.mem.eql(u8, name, u.nameSlice())) return u;
+    }
+    return null;
+}
+
+/// Check if a mention word matches any known user name
+fn isKnownUser(word: []const u8, client: *const ChatClient) bool {
+    // Check current user
+    if (client.me) |me| {
+        if (std.mem.eql(u8, word, me.nameSlice())) return true;
+    }
+    // Check other users
+    for (client.users.items) |*u| {
+        if (std.mem.eql(u8, word, u.nameSlice())) return true;
+    }
+    return false;
+}
+
+/// Draw content text with @mention highlighting.
+/// Scans for @word tokens and draws them in accent color if they match a known user.
+fn drawTextWithMentions(
+    buf: *OptimizedBuffer,
+    text: []const u8,
+    start_x: u32,
+    y: u32,
+    default_fg: RGBA,
+    mention_fg: RGBA,
+    bg: RGBA,
+    attr: u32,
+    client: *const ChatClient,
+) void {
+    var x = start_x;
+    var i: usize = 0;
+
+    while (i < text.len) {
+        if (text[i] == '@' and i + 1 < text.len and !isMentionBoundary(text[i + 1])) {
+            // Found potential mention — scan to end of word
+            var end = i + 1;
+            while (end < text.len and !isMentionBoundary(text[end])) : (end += 1) {}
+            const mention_word = text[i + 1 .. end]; // word after @
+            if (isKnownUser(mention_word, client)) {
+                // Draw "@username" in mention color
+                const mention_text = text[i..end];
+                buf.drawText(mention_text, x, y, mention_fg, bg, attr | 1) catch {}; // bold mentions
+                x += @intCast(mention_text.len);
+                i = end;
+            } else {
+                // Not a known user — draw @ normally
+                buf.drawText(text[i .. i + 1], x, y, default_fg, bg, attr) catch {};
+                x += 1;
+                i += 1;
+            }
+        } else {
+            // Regular character — find the next @ or end of text
+            var end = i + 1;
+            while (end < text.len and text[end] != '@') : (end += 1) {}
+            buf.drawText(text[i..end], x, y, default_fg, bg, attr) catch {};
+            x += @intCast(end - i);
+            i = end;
+        }
+    }
+}
 
 /// Draw a simple bordered box with a title
 fn drawBorderBox(
@@ -175,14 +251,16 @@ fn renderMessages(client: *const ChatClient, panel: *const Panel, buf: *Optimize
     var screen_row: usize = visible_rows; // next screen row to fill (top = 0, bottom = visible_rows-1)
     var msg_idx: usize = msgs.len;
 
+    const acols = client.avatarCols();
+
     while (msg_idx > 0 and screen_row > 0) {
         msg_idx -= 1;
         const msg = &msgs[msg_idx];
-        const msg_rows = types.msgRowCount(msg, available_width);
+        const msg_rows = types.msgRowCountWithAvatar(msg, available_width, acols);
 
         const name = msg.fromNameSlice();
         const content = msg.contentSlice();
-        const prefix_len: usize = @as(usize, name.len) + 3; // " name: "
+        const prefix_len: usize = @as(usize, name.len) + 3 + acols; // " [avatar ]name: "
         const content_first = if (prefix_len < available_width) available_width - prefix_len else 0;
         const wrap_width = if (available_width > 2) available_width - 2 else available_width;
 
@@ -191,6 +269,10 @@ fn renderMessages(client: *const ChatClient, panel: *const Panel, buf: *Optimize
         const content_fg = if (is_selected) t.accent else t.text;
         const name_attr: u32 = if (is_selected) 1 | 4 else 1; // bold + underline if selected
         const bg = if (is_selected) t.background_panel else t.background;
+        const has_reactions = msg.hasReactions();
+
+        // Look up avatar pattern for this sender
+        const sender_user: ?*const types.User = if (acols > 0) findUserByName(name, client) else null;
 
         // Iterate the rows of this message from bottom (last wrap line) to top (first line with name)
         var line: usize = msg_rows;
@@ -214,15 +296,52 @@ fn renderMessages(client: *const ChatClient, panel: *const Panel, buf: *Optimize
                 }
             }
 
-            if (line == 0) {
-                // First line: "name: content_start"
-                buf.drawText(name, @intCast(ix + 1), y_pos, msg.from_color, bg, name_attr) catch {};
-                const name_end: u32 = @intCast(ix + 1 + @as(u16, @intCast(name.len)));
+            if (has_reactions and line == msg_rows - 1) {
+                // Reaction badge row — render emoji badges with counts
+                var rx: u32 = @intCast(ix + 2);
+                for (0..types.MAX_REACTION_TYPES) |ri| {
+                    const count = msg.reaction_counts[ri];
+                    if (count > 0) {
+                        // Draw "emoji×N " badge
+                        const display = types.REACTION_DISPLAY[ri];
+                        buf.drawText(display, rx, y_pos, t.warning, bg, 0) catch {};
+                        rx += @intCast(display.len);
+                        var count_buf: [5]u8 = undefined;
+                        const count_str = std.fmt.bufPrint(&count_buf, "\xc3\x97{d} ", .{count}) catch "";
+                        buf.drawText(count_str, rx, y_pos, t.text_muted, bg, 0) catch {};
+                        rx += @intCast(count_str.len);
+                    }
+                }
+            } else if (line == 0) {
+                // First line: "[avatar ]name: content_start"
+                var x_cursor: u32 = @intCast(ix + 1);
+
+                // Draw avatar glyphs before username if enabled
+                if (acols > 0) {
+                    if (sender_user) |su| {
+                        const avatar = su.avatarPatternSlice();
+                        if (avatar.len > 0) {
+                            buf.drawText(avatar, x_cursor, y_pos, msg.from_color, bg, 0) catch {};
+                        } else {
+                            // No avatar pattern — draw placeholder spaces
+                            buf.drawText("   ", x_cursor, y_pos, t.text_dim, bg, 0) catch {};
+                        }
+                    } else {
+                        // Unknown sender — draw placeholder spaces
+                        buf.drawText("   ", x_cursor, y_pos, t.text_dim, bg, 0) catch {};
+                    }
+                    x_cursor += 3; // 3 glyph columns
+                    buf.drawText(" ", x_cursor, y_pos, bg, bg, 0) catch {};
+                    x_cursor += 1; // space separator
+                }
+
+                buf.drawText(name, x_cursor, y_pos, msg.from_color, bg, name_attr) catch {};
+                const name_end: u32 = x_cursor + @as(u32, @intCast(name.len));
                 buf.drawText(": ", name_end, y_pos, t.text, bg, 0) catch {};
 
                 if (content_first > 0 and content.len > 0) {
                     const first_len = @min(content.len, content_first);
-                    buf.drawText(content[0..first_len], name_end + 2, y_pos, content_fg, bg, 0) catch {};
+                    drawTextWithMentions(buf, content[0..first_len], name_end + 2, y_pos, content_fg, t.accent, bg, 0, client);
                 }
 
                 // Timestamp on first line only
@@ -241,8 +360,35 @@ fn renderMessages(client: *const ChatClient, panel: *const Panel, buf: *Optimize
                 if (offset < content.len) {
                     const remaining = content.len - offset;
                     const line_len = @min(remaining, wrap_width);
-                    buf.drawText(content[offset .. offset + line_len], @intCast(ix + 2), y_pos, content_fg, bg, 0) catch {};
+                    drawTextWithMentions(buf, content[offset .. offset + line_len], @intCast(ix + 2), y_pos, content_fg, t.accent, bg, 0, client);
                 }
+            }
+        }
+
+        // Draw unread divider above this message if it's the first unread
+        if (client.unread_divider_idx >= 0 and msg_idx == @as(usize, @intCast(client.unread_divider_idx)) and screen_row > 0) {
+            screen_row -= 1;
+            const div_y: u32 = @intCast(iy + @as(u16, @intCast(screen_row)));
+            // Draw "──── NEW ────" centered
+            const label = " NEW ";
+            const label_len: u16 = @intCast(label.len);
+            const dash_left = (iw -| label_len) / 2;
+            const dash_right = iw -| dash_left -| label_len;
+            var dx: u32 = @intCast(ix);
+            // Left dashes
+            var di: u16 = 0;
+            while (di < dash_left) : (di += 1) {
+                buf.drawText("\xe2\x94\x80", dx, div_y, t.warning, t.background, 0) catch {};
+                dx += 1;
+            }
+            // Label
+            buf.drawText(label, dx, div_y, t.warning, t.background, 1) catch {}; // bold
+            dx += label_len;
+            // Right dashes
+            di = 0;
+            while (di < dash_right) : (di += 1) {
+                buf.drawText("\xe2\x94\x80", dx, div_y, t.warning, t.background, 0) catch {};
+                dx += 1;
             }
         }
     }
@@ -316,6 +462,116 @@ fn renderCompose(client: *const ChatClient, panel: *const Panel, buf: *Optimized
             buf.drawText("Type a message...", @intCast(prompt_x), @intCast(iy), t.text_dim, t.background, 0) catch {};
         }
     }
+
+    // Typing indicator on the bottom border of the compose panel
+    if (client.typing_user_count > 0) {
+        var typing_buf: [128]u8 = undefined;
+        var typing_len: usize = 0;
+
+        // Build "user1, user2 typing..." or "user1 is typing..."
+        var i: usize = 0;
+        const count = client.typing_user_count;
+        while (i < count and i < 3) : (i += 1) {
+            const name = client.typing_users[i][0..client.typing_user_lens[i]];
+            if (typing_len + name.len + 2 > typing_buf.len - 16) break; // leave room for suffix
+            if (i > 0) {
+                @memcpy(typing_buf[typing_len .. typing_len + 2], ", ");
+                typing_len += 2;
+            }
+            @memcpy(typing_buf[typing_len .. typing_len + name.len], name);
+            typing_len += name.len;
+        }
+
+        const suffix = if (count == 1) " is typing..." else " are typing...";
+        if (typing_len + suffix.len <= typing_buf.len) {
+            @memcpy(typing_buf[typing_len .. typing_len + suffix.len], suffix);
+            typing_len += suffix.len;
+        }
+
+        // Draw on the bottom border line
+        const typing_x: u32 = @intCast(panel.x + 2);
+        const typing_y: u32 = @intCast(panel.y + panel.height - 1);
+        const max_display = @min(typing_len, @as(usize, panel.width -| 4));
+        if (max_display > 0) {
+            buf.drawText(typing_buf[0..max_display], typing_x, typing_y, t.text_muted, t.background, 2) catch {}; // italic
+        }
+    }
+}
+
+/// Render the slash command autocomplete popup above the compose panel.
+pub fn renderSlashAutocomplete(client: *const ChatClient, buf: *OptimizedBuffer) void {
+    const t = client.theme;
+    const compose_panel_idx = client.findPanelByKind(.compose) orelse return;
+    const panel = &client.panels[compose_panel_idx];
+
+    const count = client.slash_ac_filtered_count;
+    if (count == 0) return;
+    const visible = @min(count, @as(u8, @intCast(types.MAX_SLASH_VISIBLE)));
+
+    // Calculate popup dimensions
+    // Each row: "  /name  description" or "> /name  description"
+    var max_row_len: usize = 0;
+    for (0..visible) |i| {
+        const cmd_idx = client.slash_ac_filtered[i];
+        const cmd = &types.SLASH_COMMANDS[cmd_idx];
+        // "  /name  description" → 2 + 1 + name.len + 2 + description.len
+        const row_len = 2 + 1 + cmd.name.len + 2 + cmd.description.len;
+        if (row_len > max_row_len) max_row_len = row_len;
+    }
+
+    const popup_w: u16 = @intCast(@min(max_row_len + 4, @as(usize, panel.width))); // +4 for border+padding
+    const popup_h: u16 = @intCast(visible + 2); // +2 for top/bottom border
+
+    // Position: above the compose panel, left-aligned with it
+    const popup_x: u16 = panel.x;
+    const popup_y: u16 = if (panel.y >= popup_h) panel.y - popup_h else 0;
+
+    // Draw bordered box for popup
+    drawBorderBox(buf, popup_x, popup_y, popup_w, popup_h, t.border_active, t.background, null, t.text);
+
+    // Draw each filtered command row
+    const inner_x: u32 = @intCast(popup_x + 1);
+    const inner_y: u32 = @intCast(popup_y + 1);
+    const inner_w: usize = if (popup_w > 2) popup_w - 2 else 0;
+
+    for (0..visible) |i| {
+        const cmd_idx = client.slash_ac_filtered[i];
+        const cmd = &types.SLASH_COMMANDS[cmd_idx];
+        const row_y: u32 = inner_y + @as(u32, @intCast(i));
+        const is_selected = @as(u8, @intCast(i)) == client.slash_ac_idx;
+
+        // Draw background for selected row
+        if (is_selected) {
+            var col: usize = 0;
+            while (col < inner_w) : (col += 1) {
+                buf.drawText(" ", inner_x + @as(u32, @intCast(col)), row_y, t.primary, t.primary, 0) catch {};
+            }
+        }
+
+        const bg = if (is_selected) t.primary else t.background;
+        const name_fg = if (is_selected) t.background else t.accent;
+        const desc_fg = if (is_selected) t.background else t.text_muted;
+
+        // Draw prefix
+        const prefix = if (is_selected) "> " else "  ";
+        buf.drawText(prefix, inner_x, row_y, name_fg, bg, 0) catch {};
+
+        // Draw "/name"
+        var x: u32 = inner_x + 2;
+        buf.drawText("/", x, row_y, name_fg, bg, 0) catch {};
+        x += 1;
+        buf.drawText(cmd.name, x, row_y, name_fg, bg, 1) catch {}; // bold
+        x += @as(u32, @intCast(cmd.name.len));
+
+        // Draw "  description"
+        buf.drawText("  ", x, row_y, desc_fg, bg, 0) catch {};
+        x += 2;
+        const desc_avail = if (inner_w > (x - inner_x)) inner_w - (x - inner_x) else 0;
+        const desc_len = @min(cmd.description.len, desc_avail);
+        if (desc_len > 0) {
+            buf.drawText(cmd.description[0..desc_len], x, row_y, desc_fg, bg, 0) catch {};
+        }
+    }
 }
 
 fn renderChannels(client: *const ChatClient, panel: *const Panel, buf: *OptimizedBuffer) void {
@@ -359,6 +615,14 @@ fn renderChannels(client: *const ChatClient, panel: *const Panel, buf: *Optimize
             buf.drawText(name[0..max_name], @intCast(ix + 1), @intCast(iy + row), fg, bg, 0) catch {};
         }
 
+        // Unread badge
+        if (chan.unread_count > 0 and !is_active) {
+            var badge_buf: [6]u8 = undefined;
+            const badge = std.fmt.bufPrint(&badge_buf, " ({d})", .{chan.unread_count}) catch "";
+            const badge_x: u32 = @intCast(ix + 1 + @as(u16, @intCast(max_name)));
+            buf.drawText(badge, badge_x, @intCast(iy + row), t.warning, bg, 1) catch {}; // bold
+        }
+
         // Fill remaining width for selection highlight
         if (is_selected and client.isFocused(panel)) {
             const filled = 1 + @as(u16, @intCast(max_name));
@@ -391,14 +655,25 @@ fn renderMembers(client: *const ChatClient, panel: *const Panel, buf: *Optimized
     const users = client.users.items;
     var row: u16 = 0;
 
+    const acols: u16 = if (client.show_avatars) 4 else 0;
+
     // Show current user first
-    if (client.me) |me| {
+    if (client.me) |*me| {
+        var mx: u32 = @intCast(ix);
+        if (acols > 0) {
+            const avatar = me.avatarPatternSlice();
+            if (avatar.len > 0) {
+                buf.drawText(avatar, mx, @intCast(iy), me.color, t.background, 0) catch {};
+            }
+            mx += 4; // 3 glyphs + 1 space
+        }
         const name = me.nameSlice();
-        const max_name = @min(name.len, @as(usize, iw));
-        buf.drawText(name[0..max_name], @intCast(ix), @intCast(iy), me.color, t.background, 0) catch {};
+        const avail: usize = if (iw > acols) iw - acols else 0;
+        const max_name = @min(name.len, avail);
+        buf.drawText(name[0..max_name], mx, @intCast(iy), me.color, t.background, 0) catch {};
 
         const you_suffix = " (you)";
-        const suffix_x: u32 = @intCast(ix + @as(u16, @intCast(max_name)));
+        const suffix_x: u32 = mx + @as(u32, @intCast(max_name));
         buf.drawText(you_suffix, suffix_x, @intCast(iy), t.text_muted, t.background, 0) catch {};
         row += 1;
     }
@@ -422,17 +697,26 @@ fn renderMembers(client: *const ChatClient, panel: *const Panel, buf: *Optimized
             fg = t.background;
         }
 
-        const max_name = @min(name.len, @as(usize, iw));
-        buf.drawText(name[0..max_name], @intCast(ix), @intCast(iy + row), fg, bg, 0) catch {};
+        var ux: u32 = @intCast(ix);
+        if (acols > 0) {
+            const avatar = user.avatarPatternSlice();
+            if (avatar.len > 0) {
+                buf.drawText(avatar, ux, @intCast(iy + row), user.color, bg, 0) catch {};
+            }
+            ux += 4; // 3 glyphs + 1 space
+        }
+        const avail: usize = if (iw > acols) iw - acols else 0;
+        const max_name = @min(name.len, avail);
+        buf.drawText(name[0..max_name], ux, @intCast(iy + row), fg, bg, 0) catch {};
 
         // Role badge
         if (user.role == .admin) {
             const badge = " [A]";
-            const bx: u32 = @intCast(ix + @as(u16, @intCast(max_name)));
+            const bx: u32 = ux + @as(u32, @intCast(max_name));
             buf.drawText(badge, bx, @intCast(iy + row), ADMIN_BADGE_COLOR, bg, 0) catch {};
         } else if (user.role == .moderator) {
             const badge = " [M]";
-            const bx: u32 = @intCast(ix + @as(u16, @intCast(max_name)));
+            const bx: u32 = ux + @as(u32, @intCast(max_name));
             buf.drawText(badge, bx, @intCast(iy + row), MOD_BADGE_COLOR, bg, 0) catch {};
         }
 
@@ -455,99 +739,6 @@ pub fn renderLoadingScreen(client: *const ChatClient, buf: *OptimizedBuffer) voi
     buf.drawText(text, @intCast(tx), @intCast(cy), t.text_muted, t.background, 0) catch {};
 }
 
-pub fn renderRegisterScreen(client: *const ChatClient, buf: *OptimizedBuffer) void {
-    const t = client.theme;
-    const w = client.width;
-    const h = client.height;
-
-    // Centered box for registration
-    const box_w: u16 = @min(50, w -| 4);
-    const box_h: u16 = @min(16, h -| 4);
-    const box_x = (w - box_w) / 2;
-    const box_y = (h - box_h) / 2;
-
-    drawBorderBox(
-        buf,
-        box_x,
-        box_y,
-        box_w,
-        box_h,
-        t.primary,
-        t.background,
-        "Register",
-        t.primary,
-    );
-
-    const ix: u32 = @intCast(box_x + 2);
-    const iy: u32 = @intCast(box_y + 2);
-    const reg_focus = client.register_focus;
-
-    // Welcome text
-    buf.drawText("Welcome to Shush!", ix, iy, t.text_muted, t.background, 0) catch {};
-
-    // Username label + input
-    const name_label_color = if (reg_focus == .name) t.primary else t.text_muted;
-    buf.drawText("Username:", ix, iy + 2, name_label_color, t.background, 1) catch {};
-
-    if (client.register_editor_view) |ev| {
-        ev.setViewportSize(25, 1);
-        buf.drawEditorView(ev, @intCast(ix + 10), @intCast(iy + 2)) catch {};
-
-        if (reg_focus == .name) {
-            // setCursorPosition expects 1-based coordinates (ANSI convention)
-            const vc = ev.getVisualCursor();
-            client.renderer.terminal.setCursorPosition(
-                ix + 10 + vc.visual_col + 1,
-                iy + 2 + vc.visual_row + 1,
-                true,
-            );
-        }
-    }
-
-    // Color picker
-    const color_label_color = if (reg_focus == .color) t.primary else t.text_muted;
-    buf.drawText("Color:", ix, iy + 4, color_label_color, t.background, 1) catch {};
-
-    // Draw 8 color swatches
-    for (REGISTER_COLORS, 0..) |color, ci| {
-        const cx: u32 = ix + 10 + @as(u32, @intCast(ci)) * 3;
-        const is_selected = ci == client.register_color_idx;
-        if (is_selected and reg_focus == .color) {
-            // Draw brackets around selected color
-            buf.drawText("[", cx -| 1, iy + 4, t.primary, t.background, 0) catch {};
-            buf.drawText("]", cx + 2, iy + 4, t.primary, t.background, 0) catch {};
-        }
-        // Draw colored block
-        buf.fillRect(cx, iy + 4, 2, 1, color) catch {};
-    }
-
-    // Theme picker
-    const theme_label_color = if (reg_focus == .theme) t.primary else t.text_muted;
-    buf.drawText("Theme:", ix, iy + 6, theme_label_color, t.background, 1) catch {};
-
-    // Show current theme name with arrows
-    const theme_entry = &theme_mod.themes[client.register_theme_idx];
-    if (reg_focus == .theme) {
-        buf.drawText("<", ix + 10, iy + 6, t.primary, t.background, 0) catch {};
-        buf.drawText(theme_entry.name, ix + 12, iy + 6, t.text, t.background, 1) catch {};
-        const name_end: u32 = ix + 12 + @as(u32, @intCast(theme_entry.name.len));
-        buf.drawText(">", name_end + 1, iy + 6, t.primary, t.background, 0) catch {};
-    } else {
-        buf.drawText(theme_entry.name, ix + 10, iy + 6, t.text_dim, t.background, 0) catch {};
-    }
-
-    // Submit button
-    const submit_y: u32 = iy + 8;
-    if (reg_focus == .submit) {
-        buf.drawText("[ Submit ]", ix + 10, submit_y, t.primary, t.background, 1) catch {};
-    } else {
-        buf.drawText("  Submit  ", ix + 10, submit_y, t.text_muted, t.background, 0) catch {};
-    }
-
-    // Footer hints
-    buf.drawText("Tab to navigate \xc2\xb7 Enter to submit", ix, @intCast(box_y + box_h - 2), t.text_dim, t.background, 0) catch {};
-}
-
 // ===================================================================
 // Modal overlays
 // ===================================================================
@@ -568,9 +759,10 @@ pub fn renderModal(client: *const ChatClient, buf: *OptimizedBuffer) void {
         .settings_color => renderSettingsColorModal(client, buf),
         .settings_theme => renderSettingsThemeModal(client, buf),
         .settings_keybindings => renderSettingsKeybindingsModal(client, buf),
-        .settings_avatar => renderSettingsAvatarModal(client, buf),
+            .settings_avatar => renderSettingsAvatarModal(client, buf),
+            .settings_layout => renderSettingsLayoutModal(client, buf),
+        }
     }
-}
 
 fn renderHelpModal(client: *const ChatClient, buf: *OptimizedBuffer) void {
     const t = client.theme;
@@ -849,7 +1041,7 @@ fn renderSettingsColorModal(client: *const ChatClient, buf: *OptimizedBuffer) vo
     const iy: u32 = @intCast(y + 2);
 
     // Draw 8 color swatches
-    for (REGISTER_COLORS, 0..) |color, ci| {
+    for (COLOR_CHOICES, 0..) |color, ci| {
         const cx: u32 = ix + @as(u32, @intCast(ci)) * 4;
         const is_selected = ci == client.settings_color_idx;
         if (is_selected) {
@@ -861,7 +1053,7 @@ fn renderSettingsColorModal(client: *const ChatClient, buf: *OptimizedBuffer) vo
 
     // Preview
     if (client.me) |me| {
-        const preview_color = REGISTER_COLORS[client.settings_color_idx];
+        const preview_color = COLOR_CHOICES[client.settings_color_idx];
         buf.drawText(me.nameSlice(), ix, iy + 2, preview_color, t.background, 1) catch {};
     }
 
@@ -917,37 +1109,27 @@ fn renderSettingsThemeModal(client: *const ChatClient, buf: *OptimizedBuffer) vo
 
 fn renderSettingsKeybindingsModal(client: *const ChatClient, buf: *OptimizedBuffer) void {
     const t = client.theme;
-    const w: u16 = @min(50, client.width -| 4);
-    const h: u16 = @min(20, client.height -| 4);
+    const w: u16 = @min(55, client.width -| 4);
+    const h: u16 = @min(22, client.height -| 4);
     const x = @max(2, (client.width -| w) / 2);
     const y = @max(2, (client.height -| h) / 2);
 
-    drawBorderBox(buf, x, y, w, h, t.primary, t.background, "Keybindings", t.primary);
+    // Title shows listening state
+    const title = if (client.settings_kb_listening) "Keybindings \xe2\x80\x94 Press a key..." else "Keybindings";
+    const title_fg = if (client.settings_kb_listening) t.warning else t.primary;
+    drawBorderBox(buf, x, y, w, h, t.primary, t.background, title, title_fg);
 
     const ix: u32 = @intCast(x + 2);
     var iy: u32 = @intCast(y + 2);
-    const max_rows: u32 = @intCast(h -| 4);
+    const max_rows: u32 = @intCast(h -| 5); // leave room for footer
 
-    // Show current keybindings (read-only view)
-    const bindings = [_][2][]const u8{
-        .{ "Escape", "Close / quit" },
-        .{ "Ctrl+Q", "Quit immediately" },
-        .{ "F1", "Toggle help" },
-        .{ "Ctrl+S", "Settings" },
-        .{ "Ctrl+T", "Toggle timestamps" },
-        .{ "Ctrl+G", "Toggle avatars" },
-        .{ "Ctrl+U", "User picker" },
-        .{ "Ctrl+N", "New DM" },
-        .{ "Ctrl+L", "Leave DM" },
-        .{ "Ctrl+A", "Add DM member" },
-        .{ "Ctrl+Left", "Prev channel" },
-        .{ "Ctrl+Right", "Next channel" },
-        .{ "Ctrl+R", "React" },
-    };
-
-    for (bindings, 0..) |b, i| {
+    // Show keybindings from draft (so edits are visible before save)
+    for (0..types.BINDABLE_COMMAND_COUNT) |i| {
         if (iy - @as(u32, @intCast(y + 2)) >= max_rows) break;
         const is_selected = i == client.settings_kb_idx;
+        const combo = client.kb_draft[i];
+        const is_default = combo.eql(types.DEFAULT_KEYBINDINGS[i]);
+
         const fg = if (is_selected) t.background else t.text;
         const bg = if (is_selected) t.primary else t.background;
 
@@ -955,18 +1137,210 @@ fn renderSettingsKeybindingsModal(client: *const ChatClient, buf: *OptimizedBuff
             buf.fillRect(ix, iy, @intCast(w -| 4), 1, bg) catch {};
         }
 
-        buf.drawText(b[0], ix, iy, if (is_selected) fg else t.primary, bg, 1) catch {};
-        buf.drawText(b[1], ix + 18, iy, fg, bg, 0) catch {};
+        // Command label
+        const label = types.COMMAND_LABELS[i];
+        buf.drawText(label, ix, iy, fg, bg, 0) catch {};
+
+        // Key combo (or "..." if listening on this row)
+        if (is_selected and client.settings_kb_listening) {
+            buf.drawText("...", ix + 22, iy, if (is_selected) fg else t.warning, bg, 0) catch {};
+        } else {
+            var key_buf: [32]u8 = undefined;
+            const key_len = types.formatKeyCombo(combo, &key_buf);
+            const key_fg = if (is_selected) fg else if (is_default) t.primary else t.warning;
+            buf.drawText(key_buf[0..key_len], ix + 22, iy, key_fg, bg, 0) catch {};
+            // Show "*" marker for non-default bindings
+            if (!is_default) {
+                buf.drawText("*", ix + 22 + @as(u32, @intCast(key_len)) + 1, iy, if (is_selected) fg else t.warning, bg, 0) catch {};
+            }
+        }
+
         iy += 1;
     }
 
-    buf.drawText("(Read-only) Esc back", ix, @intCast(y + h - 2), t.text_dim, t.background, 0) catch {};
+    // Footer with instructions
+    buf.drawText("\xe2\x86\x91/\xe2\x86\x93 select \xc2\xb7 Enter rebind \xc2\xb7 R reset \xc2\xb7 S save \xc2\xb7 Esc cancel", ix, @intCast(y + h - 2), t.text_dim, t.background, 0) catch {};
+}
+
+fn renderSettingsLayoutModal(client: *const ChatClient, buf: *OptimizedBuffer) void {
+    const t = client.theme;
+    const layout = @import("layout.zig");
+    // Modal width: 2 chars per grid col + borders + padding, min 50
+    const cell_w: u16 = 2; // each grid cell is 2 chars wide
+    const grid_cols = client.layout_draft_grid_cols;
+    const grid_rows = client.layout_draft_grid_rows;
+    const grid_draw_w: u16 = grid_cols * cell_w;
+    const grid_draw_h: u16 = grid_rows;
+    const w: u16 = @min(@max(grid_draw_w + 6, 50), client.width -| 4);
+    const h: u16 = @min(grid_draw_h + 10, client.height -| 4);
+    const x = @max(2, (client.width -| w) / 2);
+    const y = @max(2, (client.height -| h) / 2);
+
+    const mode_label: []const u8 = switch (client.layout_editor_mode) {
+        .navigate => "Layout",
+        .select_panel => "Layout \xe2\x80\x94 Pick Type",
+        .place => "Layout \xe2\x80\x94 Place Panel",
+    };
+    const title_fg = if (client.layout_editor_mode == .navigate) t.primary else t.warning;
+    drawBorderBox(buf, x, y, w, h, t.primary, t.background, mode_label, title_fg);
+
+    const ix: u32 = @intCast(x + 2);
+    const iy_base: u32 = @intCast(y + 2);
+
+    // --- Grid info line ---
+    var info_buf: [48]u8 = undefined;
+    const info_prefix = "Grid: ";
+    @memcpy(info_buf[0..info_prefix.len], info_prefix);
+    var ipos: usize = info_prefix.len;
+    // cols
+    if (grid_cols >= 10) {
+        info_buf[ipos] = @intCast(grid_cols / 10 + '0');
+        ipos += 1;
+    }
+    info_buf[ipos] = @intCast(grid_cols % 10 + '0');
+    ipos += 1;
+    info_buf[ipos] = 'x';
+    ipos += 1;
+    // rows
+    if (grid_rows >= 10) {
+        info_buf[ipos] = @intCast(grid_rows / 10 + '0');
+        ipos += 1;
+    }
+    info_buf[ipos] = @intCast(grid_rows % 10 + '0');
+    ipos += 1;
+    const panels_prefix = "  Panels: ";
+    @memcpy(info_buf[ipos .. ipos + panels_prefix.len], panels_prefix);
+    ipos += panels_prefix.len;
+    if (client.layout_draft_count >= 10) {
+        info_buf[ipos] = @intCast(client.layout_draft_count / 10 + '0');
+        ipos += 1;
+    }
+    info_buf[ipos] = @intCast(client.layout_draft_count % 10 + '0');
+    ipos += 1;
+    buf.drawText(info_buf[0..ipos], ix, iy_base, t.text_muted, t.background, 0) catch {};
+
+    // --- Grid rendering ---
+    const grid_y: u32 = iy_base + 1;
+    const grid_x: u32 = ix;
+
+    // For each grid cell, determine what to draw
+    var row: u16 = 0;
+    while (row < grid_rows) : (row += 1) {
+        var col: u16 = 0;
+        while (col < grid_cols) : (col += 1) {
+            const cx: u32 = grid_x + @as(u32, col) * cell_w;
+            const cy: u32 = grid_y + @as(u32, row);
+
+            // Skip if outside modal
+            if (cx + cell_w > @as(u32, x) + @as(u32, w) - 2) break;
+            if (cy >= @as(u32, y) + @as(u32, h) - 3) break;
+
+            const is_cursor = (col == client.layout_cursor_col and row == client.layout_cursor_row);
+
+            // Check if cell is in place-mode selection rectangle
+            var in_selection = false;
+            if (client.layout_editor_mode == .place) {
+                const sel_c0 = @min(client.layout_anchor_col, client.layout_cursor_col);
+                const sel_c1 = @max(client.layout_anchor_col, client.layout_cursor_col);
+                const sel_r0 = @min(client.layout_anchor_row, client.layout_cursor_row);
+                const sel_r1 = @max(client.layout_anchor_row, client.layout_cursor_row);
+                if (col >= sel_c0 and col <= sel_c1 and row >= sel_r0 and row <= sel_r1) {
+                    in_selection = true;
+                }
+            }
+
+            // Find which panel occupies this cell
+            const occupant = layout.cellOccupant(&client.layout_draft_panels, client.layout_draft_count, col, row);
+
+            var fg = t.text_dim;
+            var bg = t.background;
+            var label: []const u8 = "\xc2\xb7\xc2\xb7"; // "··" (middle dot x2, 2 chars wide)
+
+            if (occupant) |pi| {
+                const p = client.layout_draft_panels[pi];
+                const kind_idx: usize = @intFromEnum(p.kind);
+                // Color panels with muted theme color
+                fg = t.text;
+                bg = t.background_panel;
+
+                // Show short label at the center of the panel region
+                const center_col = p.col + p.col_span / 2;
+                const center_row = p.row + p.row_span / 2;
+                if (col == center_col and row == center_row and kind_idx < types.PANEL_SHORT.len) {
+                    label = types.PANEL_SHORT[kind_idx];
+                } else {
+                    label = "\xe2\x96\x91\xe2\x96\x91"; // "░░" light shade x2
+                }
+            }
+
+            if (in_selection) {
+                fg = t.background;
+                bg = t.warning;
+                label = "\xe2\x96\x93\xe2\x96\x93"; // "▓▓" dark shade
+            }
+
+            if (is_cursor) {
+                fg = t.background;
+                bg = t.primary;
+                if (in_selection) {
+                    bg = t.accent;
+                }
+            }
+
+            buf.fillRect(cx, cy, cell_w, 1, bg) catch {};
+            buf.drawText(label, cx, cy, fg, bg, 0) catch {};
+        }
+    }
+
+    // --- Panel type picker (shown in select_panel mode) ---
+    if (client.layout_editor_mode == .select_panel) {
+        const picker_x: u32 = grid_x + @as(u32, grid_draw_w) + 3;
+        var picker_y: u32 = grid_y;
+        buf.drawText("Panel type:", picker_x, picker_y, t.text, t.background, 1) catch {};
+        picker_y += 1;
+        for (types.PANEL_TYPE_LABELS, 0..) |lbl, i| {
+            if (picker_y >= @as(u32, y) + @as(u32, h) - 3) break;
+            const is_sel = i == client.layout_panel_type_idx;
+            const pfg = if (is_sel) t.background else t.text;
+            const pbg = if (is_sel) t.primary else t.background;
+            if (is_sel) {
+                buf.fillRect(picker_x, picker_y, 12, 1, pbg) catch {};
+                buf.drawText("> ", picker_x, picker_y, pfg, pbg, 1) catch {};
+                buf.drawText(lbl, picker_x + 2, picker_y, pfg, pbg, 1) catch {};
+            } else {
+                buf.drawText("  ", picker_x, picker_y, pfg, pbg, 0) catch {};
+                buf.drawText(lbl, picker_x + 2, picker_y, pfg, pbg, 0) catch {};
+            }
+            picker_y += 1;
+        }
+    }
+
+    // --- Error message ---
+    if (client.layout_error_len > 0) {
+        const err_y: u32 = @intCast(y + h - 4);
+        buf.drawText(client.layout_error[0..client.layout_error_len], ix, err_y, t.err, t.background, 0) catch {};
+    }
+
+    // --- Footer with keybinding hints ---
+    const footer_y: u32 = @intCast(y + h - 2);
+    switch (client.layout_editor_mode) {
+        .navigate => {
+            buf.drawText("\xe2\x86\x91\xe2\x86\x93\xe2\x86\x90\xe2\x86\x92 move  A add  D del  [/] cols  -/= rows", ix, footer_y, t.text_dim, t.background, 0) catch {};
+            buf.drawText("R reset  S save  Esc back", ix, footer_y + 1, t.text_dim, t.background, 0) catch {};
+        },
+        .select_panel => {
+            buf.drawText("\xe2\x86\x91/\xe2\x86\x93 pick type  Enter place  Esc cancel", ix, footer_y, t.text_dim, t.background, 0) catch {};
+        },
+        .place => {
+            buf.drawText("\xe2\x86\x91\xe2\x86\x93\xe2\x86\x90\xe2\x86\x92 resize  Enter confirm  Esc cancel", ix, footer_y, t.text_dim, t.background, 0) catch {};
+        },
+    }
 }
 
 fn renderSettingsAvatarModal(client: *const ChatClient, buf: *OptimizedBuffer) void {
     const t = client.theme;
     const w: u16 = @min(40, client.width -| 4);
-    const h: u16 = 8;
+    const h: u16 = 10;
     const x = @max(2, (client.width -| w) / 2);
     const y = @max(2, (client.height -| h) / 2);
 
@@ -975,23 +1349,32 @@ fn renderSettingsAvatarModal(client: *const ChatClient, buf: *OptimizedBuffer) v
     const ix: u32 = @intCast(x + 2);
     const iy: u32 = @intCast(y + 2);
 
-    // Show 3 glyph slots with cursor
+    // Show 3 glyph slots with cursor and actual glyphs
     for (0..3) |col| {
-        const cx = ix + @as(u32, @intCast(col)) * 6;
+        const cx = ix + @as(u32, @intCast(col)) * 4;
         const is_cursor = col == client.settings_avatar_col;
-        const glyph_idx = client.settings_avatar_draft[col];
+        const glyph_idx = client.settings_avatar_draft[col] % types.AVATAR_GLYPH_COUNT;
+        const glyph = types.AVATAR_GLYPHS[glyph_idx];
+        const fg = if (is_cursor) t.primary else t.text;
+        const attr: u32 = if (is_cursor) 1 else 0; // bold if cursor
 
         if (is_cursor) {
             buf.drawText("[", cx, iy, t.primary, t.background, 0) catch {};
-            buf.drawText("]", cx + 4, iy, t.primary, t.background, 0) catch {};
+            buf.drawText("]", cx + 2, iy, t.primary, t.background, 0) catch {};
         }
-
-        // Show glyph index as a placeholder
-        var idx_buf: [3]u8 = undefined;
-        _ = std.fmt.bufPrint(&idx_buf, "{d:0>2}", .{glyph_idx}) catch {};
-        buf.drawText(idx_buf[0..2], cx + 1, iy, t.text, t.background, 0) catch {};
+        buf.drawText(glyph, cx + 1, iy, fg, t.background, attr) catch {};
     }
 
-    buf.drawText("Left/Right move, Up/Down cycle", ix, iy + 2, t.text_dim, t.background, 0) catch {};
+    // Preview: show all 3 glyphs together
+    buf.drawText("Preview: ", ix, iy + 2, t.text_muted, t.background, 0) catch {};
+    var preview_x: u32 = ix + 9;
+    for (0..3) |col| {
+        const glyph_idx = client.settings_avatar_draft[col] % types.AVATAR_GLYPH_COUNT;
+        const glyph = types.AVATAR_GLYPHS[glyph_idx];
+        buf.drawText(glyph, preview_x, iy + 2, t.accent, t.background, 0) catch {};
+        preview_x += 1;
+    }
+
+    buf.drawText("\xe2\x86\x90\xe2\x86\x92 move  \xe2\x86\x91\xe2\x86\x93 cycle  Enter save", ix, iy + 4, t.text_dim, t.background, 0) catch {};
     buf.drawText("Esc back", ix, @intCast(y + h - 2), t.text_dim, t.background, 0) catch {};
 }
