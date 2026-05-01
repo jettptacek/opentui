@@ -78,11 +78,11 @@ Guidelines:
 
 ### Diagnostics and lifecycle
 
-| API                              | Use for                                                            |
-| -------------------------------- | ------------------------------------------------------------------ | --------- | -------------- | ------------------------------------------------ |
-| `prepend/appendLayerAnalyzer()`  | Emit warnings or errors while layers compile                       |
-| `acquireResource(symbol, setup)` | Share ref-counted setup and teardown across multiple registrations |
-| `on("state"                      | "pendingSequence"                                                  | "warning" | "error", ...)` | Subscribe to derived-state and diagnostic events |
+| API                                                             | Use for                                                            |
+| --------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `prepend/appendLayerAnalyzer()`                                 | Emit warnings or errors while layers compile                       |
+| `acquireResource(symbol, setup)`                                | Share ref-counted setup and teardown across multiple registrations |
+| `on("state" \| "pendingSequence" \| "warning" \| "error", ...)` | Subscribe to derived-state and diagnostic events                   |
 
 Every registration API above returns a disposer.
 
