@@ -4,6 +4,7 @@ pub const GraphemePoolError = error{
     OutOfMemory,
     InvalidId,
     WrongGeneration,
+    GraphemeTooLarge,
 };
 
 // Encoding flags for char buffer entries (u32)
@@ -154,6 +155,13 @@ pub const GraphemePool = struct {
         return 4; // up to 128
     }
 
+    fn truncateToUtf8Boundary(bytes: []const u8, max: usize) []const u8 {
+        if (bytes.len <= max) return bytes;
+        var end: usize = max;
+        while (end > 0 and (bytes[end] & 0xC0) == 0x80) : (end -= 1) {}
+        return bytes[0..end];
+    }
+
     fn packId(class_id: u32, slot_index: u32, generation: u32) GraphemePoolError!IdPayload {
         if (slot_index > SLOT_MASK) return GraphemePoolError.OutOfMemory;
         return (class_id << (GENERATION_BITS + SLOT_BITS)) |
@@ -162,12 +170,18 @@ pub const GraphemePool = struct {
     }
 
     pub fn alloc(self: *GraphemePool, bytes: []const u8) GraphemePoolError!IdPayload {
-        if (self.lookupOrInvalidate(bytes)) |live_id| {
+        const max_class_bytes = CLASS_SIZES[MAX_CLASSES - 1];
+        const safe_bytes = truncateToUtf8Boundary(bytes, max_class_bytes);
+        if (safe_bytes.len != bytes.len) {
+            std.log.warn("grapheme: truncated oversized cluster {d} -> {d} bytes", .{ bytes.len, safe_bytes.len });
+        }
+
+        if (self.lookupOrInvalidate(safe_bytes)) |live_id| {
             return live_id;
         }
 
-        const class_id: u32 = classForSize(bytes.len);
-        const slot_index = try self.classes[class_id].allocInternal(bytes, true);
+        const class_id: u32 = classForSize(safe_bytes.len);
+        const slot_index = try self.classes[class_id].allocInternal(safe_bytes, true);
         const generation = self.classes[class_id].getGeneration(slot_index);
         return packId(class_id, slot_index, generation);
     }
@@ -303,9 +317,8 @@ pub const GraphemePool = struct {
         }
 
         pub fn allocInternal(self: *ClassPool, bytes: []const u8, is_owned: bool) GraphemePoolError!u32 {
-            // Validate size for owned allocations
             if (is_owned and bytes.len > self.slot_capacity) {
-                @panic("ClassPool.allocInternal: bytes.len > slot_capacity");
+                return GraphemePoolError.GraphemeTooLarge;
             }
 
             if (self.free_list.items.len == 0) try self.grow();

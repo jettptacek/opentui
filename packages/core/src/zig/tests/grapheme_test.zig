@@ -1302,3 +1302,30 @@ test "GraphemePool - tracker with small pool" {
     // After tracker.clear(), the graphemes have been decref'd by tracker
     // Since alloc() starts with refcount 0, after tracker decrefs, they're freed
 }
+
+test "GraphemePool - oversized zalgo cluster truncates instead of panicking" {
+    var pool = GraphemePool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    // 'a' + 200 × U+0301 = 401 bytes, past the 128-byte max class.
+    var buf: [401]u8 = undefined;
+    buf[0] = 'a';
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        buf[1 + i * 2] = 0xCC;
+        buf[1 + i * 2 + 1] = 0x81;
+    }
+
+    const id = try pool.alloc(&buf);
+    try pool.incref(id);
+    defer pool.decref(id) catch {};
+
+    const retrieved = try pool.get(id);
+    try std.testing.expect(retrieved.len <= 128);
+    try std.testing.expect(retrieved.len > 0);
+    try std.testing.expectEqual(@as(u8, 'a'), retrieved[0]);
+    // Truncation must land on a code-point boundary: tail is a whole U+0301.
+    try std.testing.expectEqual(@as(usize, 0), (retrieved.len - 1) % 2);
+    try std.testing.expectEqual(@as(u8, 0xCC), retrieved[retrieved.len - 2]);
+    try std.testing.expectEqual(@as(u8, 0x81), retrieved[retrieved.len - 1]);
+}
