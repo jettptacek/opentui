@@ -90,27 +90,36 @@ fn checkZigVersion() void {
 pub fn build(b: *std.Build) void {
     checkZigVersion();
 
+    // standardTargetOptions registers the full set of `-Dtarget`/`-Dcpu`/
+    // `-Ddynamic_linker`/`-Dofmt` options. Required so that downstream
+    // `b.dependency("opentui", .{ .target = t, .optimize = o })` works —
+    // Zig serializes a ResolvedTarget into all of those flags. Cross-builds
+    // via `-Dtarget=x86_64-linux-gnu` still work; same syntax as before.
+    const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const bench_optimize = b.option(std.builtin.OptimizeMode, "bench-optimize", "Optimize mode for benchmarks") orelse .ReleaseFast;
     const debug_use_llvm = b.option(bool, "debug-llvm", "Use LLVM backend for debug/test artifacts");
-    const target_option = b.option([]const u8, "target", "Build for specific target (e.g., 'x86_64-linux-gnu').");
     const build_all = b.option(bool, "all", "Build for all supported targets") orelse false;
     const gpa_safe_stats = b.option(bool, "gpa-safe-stats", "Enable GPA safety checks for trustworthy allocator stats") orelse false;
     const build_options = b.addOptions();
     build_options.addOption(bool, "gpa_safe_stats", gpa_safe_stats);
 
-    if (target_option) |target_str| {
-        // Build single target
-        buildSingleTarget(b, target_str, optimize, build_options) catch |err| {
-            std.debug.print("Error building target '{s}': {}\n", .{ target_str, err });
-            std.process.exit(1);
-        };
-    } else if (build_all) {
-        // Build all supported targets
+    // Public Zig consumer surface. Downstream builds reach this via
+    // `b.dependency("opentui", .{}).module("opentui")`.
+    const opentui_module = b.addModule("opentui", .{
+        .root_source_file = b.path("opentui.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    applyDependencies(b, opentui_module, optimize, target, build_options);
+
+    if (build_all) {
         buildAllTargets(b, optimize, build_options);
     } else {
-        // Build for native target only (default)
-        buildNativeTarget(b, optimize, build_options);
+        buildResolvedTarget(b, target, optimize, build_options) catch |err| {
+            std.debug.print("Build failed: {}\n", .{err});
+            std.process.exit(1);
+        };
     }
 
     // Test step (native only)
@@ -196,56 +205,35 @@ fn buildAllTargets(b: *std.Build, optimize: std.builtin.OptimizeMode, build_opti
     }
 }
 
-fn buildNativeTarget(b: *std.Build, optimize: std.builtin.OptimizeMode, build_options: *std.Build.Step.Options) void {
-    // Find the matching supported target for the native platform
-    const native_arch = @tagName(builtin.cpu.arch);
-    const native_os = @tagName(builtin.os.tag);
-
-    for (SUPPORTED_TARGETS) |supported_target| {
-        // Check if this target matches the native platform
-        if (std.mem.indexOf(u8, supported_target.zig_target, native_arch) != null and
-            std.mem.indexOf(u8, supported_target.zig_target, native_os) != null)
-        {
-            buildTarget(
-                b,
-                supported_target.zig_target,
-                supported_target.output_name,
-                supported_target.description,
-                optimize,
-                build_options,
-            ) catch |err| {
-                std.debug.print("Failed to build native target {s}: {}\n", .{ supported_target.description, err });
-            };
-            return;
-        }
-    }
-
-    std.debug.print("No matching supported target for native platform ({s}-{s})\n", .{ native_arch, native_os });
-}
-
-fn buildSingleTarget(
+fn buildResolvedTarget(
     b: *std.Build,
-    target_str: []const u8,
+    target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     build_options: *std.Build.Step.Options,
 ) !void {
-    // Check if it matches a known target, use its output_name
-    for (SUPPORTED_TARGETS) |supported_target| {
-        if (std.mem.eql(u8, target_str, supported_target.zig_target)) {
-            try buildTarget(
-                b,
-                supported_target.zig_target,
-                supported_target.output_name,
-                supported_target.description,
-                optimize,
-                build_options,
-            );
-            return;
+    const arch = target.result.cpu.arch;
+    const os = target.result.os.tag;
+
+    // Match against SUPPORTED_TARGETS for stable output_name; fall back to triple.
+    var output_name: []const u8 = undefined;
+    var description: []const u8 = undefined;
+    var matched = false;
+    for (SUPPORTED_TARGETS) |st| {
+        const q = std.Target.Query.parse(.{ .arch_os_abi = st.zig_target }) catch continue;
+        if (q.cpu_arch == arch and q.os_tag == os) {
+            output_name = st.output_name;
+            description = st.description;
+            matched = true;
+            break;
         }
     }
-    // Custom target - use target string as output name
-    const description = try std.fmt.allocPrint(b.allocator, "Custom target: {s}", .{target_str});
-    try buildTarget(b, target_str, target_str, description, optimize, build_options);
+    if (!matched) {
+        const triple = try target.result.zigTriple(b.allocator);
+        output_name = triple;
+        description = try std.fmt.allocPrint(b.allocator, "Custom target: {s}", .{triple});
+    }
+
+    try installLibForTarget(b, target, output_name, description, optimize, build_options);
 }
 
 fn buildTarget(
@@ -258,7 +246,17 @@ fn buildTarget(
 ) !void {
     const target_query = try std.Target.Query.parse(.{ .arch_os_abi = zig_target });
     const target = b.resolveTargetQuery(target_query);
+    try installLibForTarget(b, target, output_name, description, optimize, build_options);
+}
 
+fn installLibForTarget(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    output_name: []const u8,
+    description: []const u8,
+    optimize: std.builtin.OptimizeMode,
+    build_options: *std.Build.Step.Options,
+) !void {
     const module = b.createModule(.{
         .root_source_file = b.path(ROOT_SOURCE_FILE),
         .target = target,
