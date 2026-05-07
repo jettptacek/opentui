@@ -172,9 +172,6 @@ pub const GraphemePool = struct {
     pub fn alloc(self: *GraphemePool, bytes: []const u8) GraphemePoolError!IdPayload {
         const max_class_bytes = CLASS_SIZES[MAX_CLASSES - 1];
         const safe_bytes = truncateToUtf8Boundary(bytes, max_class_bytes);
-        if (safe_bytes.len != bytes.len) {
-            std.log.warn("grapheme: truncated oversized cluster {d} -> {d} bytes", .{ bytes.len, safe_bytes.len });
-        }
 
         if (self.lookupOrInvalidate(safe_bytes)) |live_id| {
             return live_id;
