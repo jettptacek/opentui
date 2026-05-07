@@ -1629,6 +1629,13 @@ fn calculateTextWidthWCWidth(text: []const u8, tab_width: u8, isASCIIOnly: bool)
     return total_width;
 }
 
+/// Maximum bytes per grapheme cluster. Clusters that would exceed this are split
+/// on a codepoint boundary into successive clusters. Real text never produces
+/// clusters this long; the cap exists to bound adversarial input (e.g. zalgo
+/// stacks of combining marks) so it cannot overflow GraphemeInfo.byte_len or
+/// reach downstream allocators with an unbounded slice.
+pub const MAX_GRAPHEME_CLUSTER_BYTES: usize = 128;
+
 /// Grapheme cluster information for caching
 pub const GraphemeInfo = struct {
     byte_offset: u32,
@@ -1761,7 +1768,11 @@ fn findGraphemeInfoUnicode(
 
             if (pos + i + cp_len > text.len) break;
 
-            const is_break = isGraphemeBreak(prev_cp, curr_cp, &break_state, width_method);
+            var is_break = isGraphemeBreak(prev_cp, curr_cp, &break_state, width_method);
+            if (!is_break and (pos + i + cp_len) - cluster_start > MAX_GRAPHEME_CLUSTER_BYTES) {
+                is_break = true;
+                break_state = .default;
+            }
 
             if (is_break) {
                 if (prev_cp != null and (cluster_is_multibyte or cluster_is_tab)) {
@@ -1806,7 +1817,11 @@ fn findGraphemeInfoUnicode(
 
         if (pos + cp_len > text.len) break;
 
-        const is_break = isGraphemeBreak(prev_cp, curr_cp, &break_state, width_method);
+        var is_break = isGraphemeBreak(prev_cp, curr_cp, &break_state, width_method);
+        if (!is_break and (pos + cp_len) - cluster_start > MAX_GRAPHEME_CLUSTER_BYTES) {
+            is_break = true;
+            break_state = .default;
+        }
 
         if (is_break) {
             if (prev_cp != null and (cluster_is_multibyte or cluster_is_tab)) {
@@ -1900,7 +1915,11 @@ fn findGraphemeInfoWCWidth(
         if (pos + cp_len > text.len) break;
 
         // Use wcwidth break detection (each codepoint is separate, tmux-style)
-        const is_break = isGraphemeBreak(prev_cp, curr_cp, &break_state, .wcwidth);
+        var is_break = isGraphemeBreak(prev_cp, curr_cp, &break_state, .wcwidth);
+        if (!is_break and cluster_started and (pos + cp_len) - cluster_start > MAX_GRAPHEME_CLUSTER_BYTES) {
+            is_break = true;
+            break_state = .default;
+        }
 
         if (is_break) {
             if (cluster_started and (cluster_is_multibyte or cluster_is_tab)) {

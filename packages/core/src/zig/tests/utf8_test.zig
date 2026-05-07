@@ -4055,3 +4055,87 @@ test "Thai: ว่ is a single grapheme cluster" {
     try testing.expectEqual(@as(usize, 1), result.items.len);
     try testing.expectEqual(@as(u8, 1), result.items[0].width);
 }
+
+// ============================================================================
+// OVERSIZED CLUSTER CAP TESTS
+// ============================================================================
+
+// Build 'a' followed by `count` copies of U+0301 (combining acute, 2 bytes each).
+fn buildZalgo(buf: []u8, count: usize) []const u8 {
+    buf[0] = 'a';
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        buf[1 + i * 2] = 0xCC;
+        buf[1 + i * 2 + 1] = 0x81;
+    }
+    return buf[0 .. 1 + count * 2];
+}
+
+test "findGraphemeInfo: oversized cluster splits at cap (unicode)" {
+    var buf: [1 + 200 * 2]u8 = undefined;
+    const text = buildZalgo(&buf, 200); // 401 bytes, well past the 128-byte cap
+
+    var result: std.ArrayListUnmanaged(utf8.GraphemeInfo) = .{};
+    defer result.deinit(testing.allocator);
+
+    try utf8.findGraphemeInfo(testing.allocator, text, 4, false, .unicode, &result);
+
+    // Every emitted cluster must fit the cap (and therefore u8 byte_len) and
+    // start on a codepoint boundary.
+    try testing.expect(result.items.len >= 1);
+    var covered: usize = 0;
+    for (result.items) |g| {
+        try testing.expect(g.byte_len <= utf8.MAX_GRAPHEME_CLUSTER_BYTES);
+        try testing.expect(g.byte_len > 0);
+        const start = @as(usize, g.byte_offset);
+        // Boundary check: no cluster starts inside a UTF-8 continuation byte.
+        try testing.expect((text[start] & 0xC0) != 0x80);
+        covered += g.byte_len;
+    }
+    // The first cluster (which has the 'a' base) is the only one with width > 0;
+    // subsequent split clusters are pure combining marks and get dropped in
+    // unicode mode. So we can't assert covered == text.len here, only that the
+    // first cluster covers the start.
+    try testing.expectEqual(@as(u32, 0), result.items[0].byte_offset);
+    try testing.expect(result.items[0].width == 1);
+}
+
+test "findGraphemeInfo: oversized cluster splits at cap (wcwidth)" {
+    var buf: [1 + 200 * 2]u8 = undefined;
+    const text = buildZalgo(&buf, 200);
+
+    var result: std.ArrayListUnmanaged(utf8.GraphemeInfo) = .{};
+    defer result.deinit(testing.allocator);
+
+    try utf8.findGraphemeInfo(testing.allocator, text, 4, false, .wcwidth, &result);
+
+    // wcwidth mode keeps width-0 clusters, so every byte should be covered by
+    // some emitted cluster and each cluster must respect the cap.
+    try testing.expect(result.items.len >= 2);
+    var covered: usize = 0;
+    var prev_end: usize = 0;
+    for (result.items) |g| {
+        try testing.expect(g.byte_len <= utf8.MAX_GRAPHEME_CLUSTER_BYTES);
+        try testing.expect(g.byte_len > 0);
+        const start = @as(usize, g.byte_offset);
+        try testing.expectEqual(prev_end, start);
+        try testing.expect((text[start] & 0xC0) != 0x80);
+        prev_end = start + g.byte_len;
+        covered += g.byte_len;
+    }
+    try testing.expectEqual(text.len, covered);
+}
+
+test "findGraphemeInfo: cluster just at the cap stays a single cluster" {
+    // 'a' + 63 combining marks = 1 + 126 = 127 bytes, under the 128-byte cap.
+    var buf: [1 + 63 * 2]u8 = undefined;
+    const text = buildZalgo(&buf, 63);
+
+    var result: std.ArrayListUnmanaged(utf8.GraphemeInfo) = .{};
+    defer result.deinit(testing.allocator);
+
+    try utf8.findGraphemeInfo(testing.allocator, text, 4, false, .unicode, &result);
+
+    try testing.expectEqual(@as(usize, 1), result.items.len);
+    try testing.expectEqual(@as(u8, 127), result.items[0].byte_len);
+}
