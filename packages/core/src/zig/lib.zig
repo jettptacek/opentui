@@ -1917,6 +1917,12 @@ export fn encodeUnicode(
         if (grapheme_bytes.len == 1 and cell_width == 1 and grapheme_bytes[0] >= 32) {
             // Simple ASCII character
             encoded_char = @as(u32, grapheme_bytes[0]);
+        } else if (grapheme_bytes.len > gp.MAX_GRAPHEME_BYTES) {
+            // Cluster too large for the pool. Drop trailing combining marks and
+            // encode just the first codepoint as a direct scalar so the cell
+            // still renders something readable.
+            const decoded = utf8.decodeUtf8Unchecked(grapheme_bytes, 0);
+            encoded_char = @as(u32, decoded.cp);
         } else {
             // Multi-byte or special character - allocate in pool
             const gid = pool.alloc(grapheme_bytes) catch return false;

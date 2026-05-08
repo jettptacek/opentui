@@ -31,13 +31,17 @@ pub const CLASS_MASK: u32 = (@as(u32, 1) << CLASS_BITS) - 1; // 0b111
 pub const GENERATION_MASK: u32 = (@as(u32, 1) << GENERATION_BITS) - 1; // 0b1111111
 pub const SLOT_MASK: u32 = (@as(u32, 1) << SLOT_BITS) - 1; // 0xFFFF
 
+/// Largest grapheme cluster the pool can store. Callers should fall back when a
+/// cluster exceeds this; pool.alloc returns GraphemeTooLarge in that case.
+pub const MAX_GRAPHEME_BYTES: u32 = 128;
+
 /// Global slab-allocated pool for grapheme clusters (byte slices)
 /// This is total overkill probably, but fun
 /// ID layout (26-bit payload):
 /// [ class (3 bits) | generation (7 bits) | slot_index (16 bits) ]
 pub const GraphemePool = struct {
     const MAX_CLASSES: u5 = 5; // 0..4 => 8,16,32,64,128
-    const CLASS_SIZES = [_]u32{ 8, 16, 32, 64, 128 };
+    const CLASS_SIZES = [_]u32{ 8, 16, 32, 64, MAX_GRAPHEME_BYTES };
     const DEFAULT_SLOTS_PER_PAGE = [_]u32{ 256, 128, 64, 16, 8 };
 
     pub const IdPayload = u32;
@@ -155,13 +159,6 @@ pub const GraphemePool = struct {
         return 4; // up to 128
     }
 
-    fn truncateToUtf8Boundary(bytes: []const u8, max: usize) []const u8 {
-        if (bytes.len <= max) return bytes;
-        var end: usize = max;
-        while (end > 0 and (bytes[end] & 0xC0) == 0x80) : (end -= 1) {}
-        return bytes[0..end];
-    }
-
     fn packId(class_id: u32, slot_index: u32, generation: u32) GraphemePoolError!IdPayload {
         if (slot_index > SLOT_MASK) return GraphemePoolError.OutOfMemory;
         return (class_id << (GENERATION_BITS + SLOT_BITS)) |
@@ -170,15 +167,12 @@ pub const GraphemePool = struct {
     }
 
     pub fn alloc(self: *GraphemePool, bytes: []const u8) GraphemePoolError!IdPayload {
-        const max_class_bytes = CLASS_SIZES[MAX_CLASSES - 1];
-        const safe_bytes = truncateToUtf8Boundary(bytes, max_class_bytes);
-
-        if (self.lookupOrInvalidate(safe_bytes)) |live_id| {
+        if (self.lookupOrInvalidate(bytes)) |live_id| {
             return live_id;
         }
 
-        const class_id: u32 = classForSize(safe_bytes.len);
-        const slot_index = try self.classes[class_id].allocInternal(safe_bytes, true);
+        const class_id: u32 = classForSize(bytes.len);
+        const slot_index = try self.classes[class_id].allocInternal(bytes, true);
         const generation = self.classes[class_id].getGeneration(slot_index);
         return packId(class_id, slot_index, generation);
     }

@@ -1303,7 +1303,7 @@ test "GraphemePool - tracker with small pool" {
     // Since alloc() starts with refcount 0, after tracker decrefs, they're freed
 }
 
-test "GraphemePool - oversized zalgo cluster truncates instead of panicking" {
+test "GraphemePool - error on oversized cluster" {
     var pool = GraphemePool.init(std.testing.allocator);
     defer pool.deinit();
 
@@ -1316,16 +1316,7 @@ test "GraphemePool - oversized zalgo cluster truncates instead of panicking" {
         buf[1 + i * 2 + 1] = 0x81;
     }
 
-    const id = try pool.alloc(&buf);
-    try pool.incref(id);
-    defer pool.decref(id) catch {};
-
-    const retrieved = try pool.get(id);
-    try std.testing.expect(retrieved.len <= 128);
-    try std.testing.expect(retrieved.len > 0);
-    try std.testing.expectEqual(@as(u8, 'a'), retrieved[0]);
-    // Truncation must land on a code-point boundary: tail is a whole U+0301.
-    try std.testing.expectEqual(@as(usize, 0), (retrieved.len - 1) % 2);
-    try std.testing.expectEqual(@as(u8, 0xCC), retrieved[retrieved.len - 2]);
-    try std.testing.expectEqual(@as(u8, 0x81), retrieved[retrieved.len - 1]);
+    // Allocating oversized cluster should return error
+    const result = pool.alloc(&buf);
+    try std.testing.expectError(gp.GraphemePoolError.GraphemeTooLarge, result);
 }
